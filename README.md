@@ -66,6 +66,23 @@ This is particularly useful in setups that contain an important validator and ut
 run in light mode on the validator and in full capacity on the RPC node (configured to monitor the validator through 
 use of the `-nodekey` parameter).
 
+#### Version Monitoring
+
+The exporter can compare your node's Solana version against a reference RPC (e.g., mainnet) and alert when your version 
+is outdated. This is controlled by the `-reference-rpc-url` flag (defaults to `https://api.mainnet-beta.solana.com`).
+
+The `solana_node_version_outdated` metric will be `1` if your node version is older than the reference, and `0` otherwise.
+Labels `current` and `latest` show the respective versions for easy debugging.
+
+Example alert rule is included in [solana-rules.yml](prometheus/solana-rules.yml):
+```yaml
+- alert: SolanaNodeVersionOutdated
+  expr: solana_node_version_outdated == 1
+  for: 5m
+  labels:
+    severity: warning
+```
+
 #### General Performance and Health
 
 In addition to the above features, the exporter provides key metrics for monitoring Solana node health and performance. 
@@ -78,7 +95,7 @@ Assuming you already have [Go installed](https://go.dev/doc/install), the `solan
 cloning this repository and building the binary:
 
 ```shell
-git clone https://github.com/asymmetric-research/solana-exporter.git
+git clone https://github.com/noders-team/solana-exporter.git
 cd solana-exporter
 CGO_ENABLED=0 go build ./cmd/solana-exporter
 ```
@@ -102,7 +119,8 @@ The exporter is configured via the following command line arguments:
 | `-rpc-url`                             | Solana RPC URL (including protocol and path), e.g., `"http://localhost:8899"` or `"https://api.mainnet-beta.solana.com"`                                                                                                | `"http://localhost:8899"` |
 | `-slot-pace`                           | This is the time (in seconds) between slot-watching metric collections                                                                                                                                                  | `1`                       |
 | `-active-identity`                     | Validator identity public key used to determine if the node is considered active in the `solana_node_is_active` metric.                                                                                                 | N/A                       |
-| `-epoch-cleanup-time`                  | The time to wait before cleaning old epoch metrics from the prometheus endpoint.                                                                                                                                        |                           |
+| `-epoch-cleanup-time`                  | The time to wait before cleaning old epoch metrics from the prometheus endpoint.                                                                                                                                        | `60`                      |
+| `-reference-rpc-url`                   | Reference RPC URL to fetch the latest Solana version for comparison. Used for `solana_node_version_outdated` metric.                                                                                                    | `"https://api.mainnet-beta.solana.com"` |
 
 ### Notes on Configuration
 
@@ -161,6 +179,7 @@ The tables below describes all the metrics collected by the `solana-exporter`:
 | `solana_validator_block_size`                  | Number of transactions per block.                                                                                     | `nodekey`, `transaction_type` |
 | `solana_node_block_height`                     | The current block height of the node.                                                                                 | N/A                           |
 | `solana_node_is_active`                        | Whether the node is active and participating in consensus.                                                            | `identity`                    |
+| `solana_node_version_outdated`                 | Whether the node version is outdated compared to reference RPC (1=outdated, 0=up-to-date).                            | `current`, `latest`           |
 
 #### Vote Account Metrics
 
@@ -188,3 +207,5 @@ The table below describes the various metric labels:
 | `status`           | Whether a slot was skipped or valid.          | `valid`, `skipped`                                   |
 | `epoch`            | Solana epoch number.                          | e.g., `663`                                          |
 | `transaction_type` | General transaction type.                     | `vote`, `non_vote`                                   |
+| `current`          | Current node version.                         | e.g., `v1.18.23`                                     |
+| `latest`           | Latest version from reference RPC.            | e.g., `v1.18.24`                                     |
