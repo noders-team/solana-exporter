@@ -27,7 +27,11 @@ func main() {
 	}
 
 	rpcClient := rpc.NewRPCClient(config.RpcUrl, config.HttpTimeout)
-	collector := NewSolanaCollector(rpcClient, config)
+	var referenceRpcClient *rpc.Client
+	if config.ReferenceRpcUrl != "" {
+		referenceRpcClient = rpc.NewRPCClient(config.ReferenceRpcUrl, config.HttpTimeout)
+	}
+	collector := NewSolanaCollector(rpcClient, referenceRpcClient, config)
 	slotWatcher := NewSlotWatcher(rpcClient, config)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

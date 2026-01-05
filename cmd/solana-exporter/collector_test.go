@@ -224,7 +224,7 @@ func TestSolanaCollector(t *testing.T) {
 	simulator, client := NewSimulator(t, 35)
 	simulator.Server.SetOpt(rpc.EasyResultsOpt, "getGenesisHash", rpc.MainnetGenesisHash)
 
-	collector := NewSolanaCollector(client, newTestConfig(simulator, false))
+	collector := NewSolanaCollector(client, nil, newTestConfig(simulator, false))
 	prometheus.NewPedanticRegistry().MustRegister(collector)
 
 	stake := float64(1_000_000) / rpc.LamportsInSol
@@ -310,7 +310,7 @@ func TestSolanaCollector(t *testing.T) {
 func TestSolanaCollector_collectHealth(t *testing.T) {
 	simulator, client := NewSimulator(t, 0)
 
-	collector := NewSolanaCollector(client, newTestConfig(simulator, false))
+	collector := NewSolanaCollector(client, nil, newTestConfig(simulator, false))
 	prometheus.NewPedanticRegistry().MustRegister(collector)
 
 	t.Run("healthy", func(t *testing.T) {

@@ -22,6 +22,8 @@ const (
 	AddressLabel         = "address"
 	EpochLabel           = "epoch"
 	TransactionTypeLabel = "transaction_type"
+	CurrentVersionLabel  = "current"
+	LatestVersionLabel   = "latest"
 
 	StatusSkipped = "skipped"
 	StatusValid   = "valid"
@@ -34,8 +36,9 @@ const (
 )
 
 type SolanaCollector struct {
-	rpcClient *rpc.Client
-	logger    *zap.SugaredLogger
+	rpcClient          *rpc.Client
+	referenceRpcClient *rpc.Client
+	logger             *zap.SugaredLogger
 
 	config *ExporterConfig
 
@@ -57,13 +60,15 @@ type SolanaCollector struct {
 	NodeIdentity            *GaugeDesc
 	NodeIsActive            *GaugeDesc
 	ValidatorCommission     *GaugeDesc
+	NodeVersionOutdated     *GaugeDesc
 }
 
-func NewSolanaCollector(rpcClient *rpc.Client, config *ExporterConfig) *SolanaCollector {
+func NewSolanaCollector(rpcClient *rpc.Client, referenceRpcClient *rpc.Client, config *ExporterConfig) *SolanaCollector {
 	collector := &SolanaCollector{
-		rpcClient: rpcClient,
-		logger:    slog.Get(),
-		config:    config,
+		rpcClient:          rpcClient,
+		referenceRpcClient: referenceRpcClient,
+		logger:             slog.Get(),
+		config:             config,
 		ValidatorActiveStake: NewGaugeDesc(
 			"solana_validator_active_stake",
 			fmt.Sprintf("Active stake (in SOL) per validator (represented by %s and %s)", VotekeyLabel, NodekeyLabel),
@@ -145,6 +150,11 @@ func NewSolanaCollector(rpcClient *rpc.Client, config *ExporterConfig) *SolanaCo
 			fmt.Sprintf("Validator commission, as a percentage (represented by %s and %s)", VotekeyLabel, NodekeyLabel),
 			VotekeyLabel, NodekeyLabel,
 		),
+		NodeVersionOutdated: NewGaugeDesc(
+			"solana_node_version_outdated",
+			fmt.Sprintf("Whether the node version is outdated compared to reference RPC (1=outdated, 0=up-to-date), with %s and %s labels", CurrentVersionLabel, LatestVersionLabel),
+			CurrentVersionLabel, LatestVersionLabel,
+		),
 	}
 	return collector
 }
@@ -167,6 +177,7 @@ func (c *SolanaCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.NodeFirstAvailableBlock.Desc
 	ch <- c.NodeIsActive.Desc
 	ch <- c.ValidatorCommission.Desc
+	ch <- c.NodeVersionOutdated.Desc
 }
 
 func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- prometheus.Metric) {
@@ -248,6 +259,41 @@ func (c *SolanaCollector) collectVersion(ctx context.Context, ch chan<- promethe
 
 	ch <- c.NodeVersion.MustNewConstMetric(1, version)
 	c.logger.Info("Version collected.")
+
+	// Сравнение с reference RPC версией
+	if c.referenceRpcClient != nil {
+		c.collectVersionComparison(ctx, ch, version)
+	}
+}
+
+func (c *SolanaCollector) collectVersionComparison(ctx context.Context, ch chan<- prometheus.Metric, currentVersion string) {
+	c.logger.Info("Collecting version comparison...")
+
+	referenceVersion, err := c.referenceRpcClient.GetVersion(ctx)
+	if err != nil {
+		c.logger.Errorf("failed to get reference version: %v", err)
+		ch <- c.NodeVersionOutdated.NewInvalidMetric(err)
+		return
+	}
+
+	currentSemVer, err := ParseSemVer(currentVersion)
+	if err != nil {
+		c.logger.Errorf("failed to parse current version '%s': %v", currentVersion, err)
+		ch <- c.NodeVersionOutdated.NewInvalidMetric(err)
+		return
+	}
+
+	referenceSemVer, err := ParseSemVer(referenceVersion)
+	if err != nil {
+		c.logger.Errorf("failed to parse reference version '%s': %v", referenceVersion, err)
+		ch <- c.NodeVersionOutdated.NewInvalidMetric(err)
+		return
+	}
+
+	isOutdated := BoolToFloat64(currentSemVer.IsOlderThan(referenceSemVer))
+	ch <- c.NodeVersionOutdated.MustNewConstMetric(isOutdated, currentVersion, referenceVersion)
+
+	c.logger.Infof("Version comparison: current=%s, reference=%s, outdated=%v", currentVersion, referenceVersion, isOutdated == 1)
 }
 
 func (c *SolanaCollector) collectIdentity(ctx context.Context, ch chan<- prometheus.Metric) {

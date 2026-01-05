@@ -27,6 +27,7 @@ type (
 		SlotPace                         time.Duration
 		ActiveIdentity                   string
 		EpochCleanupTime                 time.Duration
+		ReferenceRpcUrl                  string
 	}
 )
 
@@ -54,6 +55,7 @@ func NewExporterConfig(
 	slotPace time.Duration,
 	activeIdentity string,
 	epochCleanupTime time.Duration,
+	referenceRpcUrl string,
 ) (*ExporterConfig, error) {
 	logger := slog.Get()
 	logger.Infow(
@@ -71,6 +73,7 @@ func NewExporterConfig(
 		"activeIdentity", activeIdentity,
 		"slotPace", slotPace,
 		"epochCleanupTime", epochCleanupTime,
+		"referenceRpcUrl", referenceRpcUrl,
 	)
 	if lightMode {
 		if comprehensiveSlotTracking {
@@ -127,6 +130,7 @@ func NewExporterConfig(
 		SlotPace:                         slotPace,
 		ActiveIdentity:                   activeIdentity,
 		EpochCleanupTime:                 epochCleanupTime,
+		ReferenceRpcUrl:                  referenceRpcUrl,
 	}
 
 	return &config, nil
@@ -147,6 +151,7 @@ func NewExporterConfigFromCLI(ctx context.Context) (*ExporterConfig, error) {
 		slotPace                         int
 		activeIdentity                   string
 		epochCleanupTime                 int
+		referenceRpcUrl                  string
 	)
 	flag.IntVar(
 		&httpTimeout,
@@ -232,6 +237,12 @@ func NewExporterConfigFromCLI(ctx context.Context) (*ExporterConfig, error) {
 		"",
 		"Validator identity public key that determines if the node is considered active in the 'solana_node_is_active' metric.",
 	)
+	flag.StringVar(
+		&referenceRpcUrl,
+		"reference-rpc-url",
+		"https://api.mainnet-beta.solana.com",
+		"Reference RPC URL to fetch the latest Solana version for comparison (e.g., mainnet RPC).",
+	)
 	flag.Parse()
 
 	config, err := NewExporterConfig(
@@ -249,6 +260,7 @@ func NewExporterConfigFromCLI(ctx context.Context) (*ExporterConfig, error) {
 		time.Duration(slotPace)*time.Second,
 		activeIdentity,
 		time.Duration(epochCleanupTime)*time.Second,
+		referenceRpcUrl,
 	)
 	if err != nil {
 		return nil, err

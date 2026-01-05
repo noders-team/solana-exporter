@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+
 	"github.com/asymmetric-research/solana-exporter/pkg/rpc"
 	"github.com/asymmetric-research/solana-exporter/pkg/slog"
 	"slices"
-	"sync"
 )
 
 const VoteProgram = "Vote111111111111111111111111111111111111111"
@@ -238,6 +241,76 @@ func BoolToFloat64(b bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+// SemVer представляет семантическую версию
+type SemVer struct {
+	Major int
+	Minor int
+	Patch int
+}
+
+// ParseSemVer парсит строку версии вида "v1.18.23" или "1.18.23" в структуру SemVer
+func ParseSemVer(version string) (SemVer, error) {
+	// Убираем префикс "v" если есть
+	version = strings.TrimPrefix(version, "v")
+
+	// Разбиваем по точкам
+	parts := strings.Split(version, ".")
+	if len(parts) < 3 {
+		return SemVer{}, fmt.Errorf("invalid semver format: %s", version)
+	}
+
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return SemVer{}, fmt.Errorf("invalid major version: %s", parts[0])
+	}
+
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return SemVer{}, fmt.Errorf("invalid minor version: %s", parts[1])
+	}
+
+	// Patch может содержать суффиксы типа "-beta", отсекаем их
+	patchStr := strings.Split(parts[2], "-")[0]
+	patch, err := strconv.Atoi(patchStr)
+	if err != nil {
+		return SemVer{}, fmt.Errorf("invalid patch version: %s", patchStr)
+	}
+
+	return SemVer{Major: major, Minor: minor, Patch: patch}, nil
+}
+
+// Compare сравнивает две версии. Возвращает:
+//
+//	-1 если v < other
+//	 0 если v == other
+//	 1 если v > other
+func (v SemVer) Compare(other SemVer) int {
+	if v.Major != other.Major {
+		if v.Major < other.Major {
+			return -1
+		}
+		return 1
+	}
+	if v.Minor != other.Minor {
+		if v.Minor < other.Minor {
+			return -1
+		}
+		return 1
+	}
+	if v.Patch != other.Patch {
+		if v.Patch < other.Patch {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+// IsOlderThan возвращает true если версия v старше (меньше) чем other
+func (v SemVer) IsOlderThan(other SemVer) bool {
+	return v.Compare(other) < 0
 }
 
 // ExtractHealthAndNumSlotsBehind takes the outputs from the GetHealth RPC method and determines the corresponding

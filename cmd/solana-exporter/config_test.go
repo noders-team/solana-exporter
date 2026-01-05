@@ -124,6 +124,7 @@ func TestNewExporterConfig(t *testing.T) {
 				tt.slotPace,
 				tt.activeIdentity,
 				tt.epochCleanupTime,
+				"",
 			)
 
 			// Check error expectation

@@ -1,4 +1,15 @@
 groups:
+  - name: solana_alerts
+    rules:
+      - alert: SolanaNodeVersionOutdated
+        expr: solana_node_version_outdated == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Solana node version is outdated"
+          description: "Node is running version {{ $labels.current }}, but reference RPC has version {{ $labels.latest }}"
+
   - name: solana_recording_rules
     interval: 30s
     rules:
