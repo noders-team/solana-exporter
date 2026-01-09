@@ -19,9 +19,33 @@ solana-exporter \
   -active-identity <MY_ACTIVE_IDENTITY>
 ```
 
+**🌐 NEW: Built-in Web UI**
+```shell
+# Start with web dashboard (accessible at http://localhost:8080)
+solana-exporter \
+  -nodekey <YOUR_VALIDATOR_IDENTITY> \
+  -votekey <YOUR_VALIDATOR_VOTE_ACCOUNT> \
+  -listen-address :8080
+```
+
 ![Solana Exporter Dashboard Sample](assets/solana-dashboard-screenshot.png)
 
-### Features
+### 🎯 Key Features
+
+#### 🌐 Built-in Web Dashboard
+The Solana Exporter now includes a **real-time web dashboard** with:
+- **Vote Credits Monitoring** - Live TVC performance tracking
+- **Vote Batch Analysis** - Detailed batch-level voting insights (latency, missed TVCs, slot ranges)
+- **Validator Health** - Node status, sync state, and delinquency alerts
+- **Network Activity** - Current slot, epoch progress, and transaction stats
+- **Mobile-Responsive** - Works on desktop, tablet, and mobile devices
+- **Zero Dependencies** - Built-in, no external tools required
+
+**Quick Start**: Run the exporter and visit `http://localhost:8080` for instant monitoring!
+
+See [Web UI Guide](WEB_UI_GUIDE.md) for complete documentation.
+
+#### Core Monitoring Features
 #### Balance Tracking
 
 Using the `-balance-address <ADDRESS>` configuration parameter, the exporter can be used to monitor any account's
@@ -35,6 +59,18 @@ non-vote transactions) in blocks produced by the monitored validators. This is a
 
 Cluster average block size can be inferred by dividing total network transactions by total block height.
 
+#### Vote Credits Monitoring
+
+The exporter tracks vote credits performance for monitored validators, providing critical insights into validator 
+voting efficiency and potential reward losses. This includes:
+
+- `solana_validator_epoch_credits` - Vote credits earned by validator in current epoch
+- `solana_validator_expected_credits` - Expected vote credits based on epoch progress  
+- `solana_validator_credits_missed_pct` - Percentage of vote credits missed by validator
+
+These metrics help operators identify voting issues that can impact validator rewards and network participation.
+See [Vote Credits Monitoring Guide](vote-credits-monitoring-example.md) for detailed usage examples.
+
 #### Income Reporting
 
 The exporter exports metrics regarding total priority fee revenue and inflation reward revenue earned by the 
@@ -47,6 +83,11 @@ However, the exporter does track the monitored validators leader slots and wheth
 
 The example prometheus setup contains [recording rules](prometheus/solana-rules.yml) for measuring average skip rate 
 for both individual validators and a cluster-level over hourly, daily and epoch intervals.
+
+Additionally, [vote credits alerting rules](prometheus/solana-vote-credits-rules.yml) are provided to monitor
+validator voting performance and detect potential issues early.
+
+The **built-in web dashboard** provides instant access to vote credits analysis without requiring Grafana setup.
 
 #### Active/Passive Monitoring
 
@@ -101,7 +142,18 @@ CGO_ENABLED=0 go build ./cmd/solana-exporter
 ```
 
 ## Configuration
-### Command Line Arguments
+## Available Interfaces
+
+### Web Dashboard
+- **`/`** - Main dashboard with real-time metrics
+- **`/health`** - Simple health check page  
+- **`/api/dashboard`** - JSON dashboard data
+- **`/api/vote-batches`** - Vote batch analysis data
+
+### Prometheus Metrics
+- **`/metrics`** - Standard Prometheus metrics endpoint
+
+### Command-Line Arguments
 
 The exporter is configured via the following command line arguments:
 

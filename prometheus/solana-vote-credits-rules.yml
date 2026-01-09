@@ -1,0 +1,230 @@
+groups:
+  - name: solana-vote-credits
+    interval: 30s
+    rules:
+
+    # Vote Credit Performance Recording Rules
+    - record: solana:validator_vote_performance_pct
+      expr: 100 - solana_validator_credits_missed_pct
+      labels:
+        metric_type: "performance"
+
+    - record: solana:validator_vote_lag_slots
+      expr: solana_node_slot_height - solana_validator_last_vote
+      labels:
+        metric_type: "lag"
+
+    - record: solana:cluster_avg_vote_performance
+      expr: avg(100 - solana_validator_credits_missed_pct)
+      labels:
+        metric_type: "cluster_baseline"
+
+    # Alert Rules for Vote Credit Issues
+
+    # CRITICAL: Very high vote credit miss rate
+    - alert: SolanaValidatorCriticalVoteMissRate
+      expr: solana_validator_credits_missed_pct > 15
+      for: 2m
+      labels:
+        severity: critical
+        service: solana-validator
+        alert_type: vote_credits
+      annotations:
+        summary: "🚨 Solana validator {{ $labels.nodekey }} critical vote miss rate"
+        description: |
+          Validator {{ $labels.nodekey }} is missing {{ printf "%.2f" $value }}% of vote credits in current epoch.
+          This will significantly impact rewards and may lead to delinquency.
+
+          Troubleshooting steps:
+          1. Check validator logs for errors
+          2. Verify network connectivity and RPC health
+          3. Monitor CPU and memory usage
+          4. Consider restarting validator if issues persist
+
+    # WARNING: High vote credit miss rate
+    - alert: SolanaValidatorHighVoteMissRate
+      expr: solana_validator_credits_missed_pct > 5 and solana_validator_credits_missed_pct <= 15
+      for: 5m
+      labels:
+        severity: warning
+        service: solana-validator
+        alert_type: vote_credits
+      annotations:
+        summary: "⚠️ Solana validator {{ $labels.nodekey }} high vote miss rate"
+        description: |
+          Validator {{ $labels.nodekey }} is missing {{ printf "%.2f" $value }}% of vote credits.
+          Current performance: {{ printf "%.2f" (query "100 - solana_validator_credits_missed_pct{nodekey=\"" $labels.nodekey "\"}") | first | value }}%
+          Cluster average: {{ printf "%.2f" (query "solana:cluster_avg_vote_performance") | first | value }}%
+
+    # CRITICAL: Excessive vote lag
+    - alert: SolanaValidatorExcessiveVoteLag
+      expr: (solana_node_slot_height - solana_validator_last_vote) > 50
+      for: 1m
+      labels:
+        severity: critical
+        service: solana-validator
+        alert_type: vote_lag
+      annotations:
+        summary: "🚨 Solana validator {{ $labels.nodekey }} excessive vote lag"
+        description: |
+          Validator {{ $labels.nodekey }} is {{ $value }} slots behind in voting.
+          This indicates severe network or performance issues.
+
+          Current status:
+          - Vote lag: {{ $value }} slots
+          - Last vote: {{ query "solana_validator_last_vote{nodekey=\"" $labels.nodekey "\"}" | first | value }}
+          - Current slot: {{ query "solana_node_slot_height" | first | value }}
+
+    # WARNING: Moderate vote lag
+    - alert: SolanaValidatorModerateVoteLag
+      expr: (solana_node_slot_height - solana_validator_last_vote) > 20 and (solana_node_slot_height - solana_validator_last_vote) <= 50
+      for: 3m
+      labels:
+        severity: warning
+        service: solana-validator
+        alert_type: vote_lag
+      annotations:
+        summary: "⚠️ Solana validator {{ $labels.nodekey }} moderate vote lag"
+        description: |
+          Validator {{ $labels.nodekey }} is {{ $value }} slots behind in voting.
+          Monitor closely to prevent escalation to critical levels.
+
+    # CRITICAL: Validator marked delinquent
+    - alert: SolanaValidatorDelinquent
+      expr: solana_validator_delinquent == 1
+      for: 0s  # Alert immediately
+      labels:
+        severity: critical
+        service: solana-validator
+        alert_type: delinquent
+      annotations:
+        summary: "🚨 Solana validator {{ $labels.nodekey }} is DELINQUENT"
+        description: |
+          Validator {{ $labels.nodekey }} has been marked as delinquent by the cluster.
+          This means it's not participating in consensus and earning no rewards.
+
+          Immediate actions required:
+          1. Check validator health and logs
+          2. Verify stake account status
+          3. Restart validator if necessary
+          4. Monitor for recovery
+
+    # WARNING: Validator performance below cluster average
+    - alert: SolanaValidatorBelowAverage
+      expr: (100 - solana_validator_credits_missed_pct) < (solana:cluster_avg_vote_performance - 2)
+      for: 10m
+      labels:
+        severity: warning
+        service: solana-validator
+        alert_type: underperformance
+      annotations:
+        summary: "📉 Solana validator {{ $labels.nodekey }} below cluster average"
+        description: |
+          Validator performance: {{ printf "%.2f" (query "100 - solana_validator_credits_missed_pct{nodekey=\"" $labels.nodekey "\"}") | first | value }}%
+          Cluster average: {{ printf "%.2f" (query "solana:cluster_avg_vote_performance") | first | value }}%
+
+          Consider investigating potential issues with hardware, network, or configuration.
+
+    # INFO: Validator recovery from issues
+    - alert: SolanaValidatorRecovered
+      expr: |
+        (100 - solana_validator_credits_missed_pct) > 98
+        and
+        (100 - solana_validator_credits_missed_pct offset 5m) < 95
+      for: 2m
+      labels:
+        severity: info
+        service: solana-validator
+        alert_type: recovery
+      annotations:
+        summary: "✅ Solana validator {{ $labels.nodekey }} recovered"
+        description: |
+          Validator {{ $labels.nodekey }} has recovered from performance issues.
+          Current performance: {{ printf "%.2f" $value }}%
+          Previous performance: {{ printf "%.2f" (query "100 - solana_validator_credits_missed_pct{nodekey=\"" $labels.nodekey "\"} offset 5m") | first | value }}%
+
+  - name: solana-node-health
+    interval: 30s
+    rules:
+
+    # Node health and connectivity alerts
+    - alert: SolanaNodeUnhealthy
+      expr: solana_node_is_healthy == 0
+      for: 1m
+      labels:
+        severity: critical
+        service: solana-node
+        alert_type: health
+      annotations:
+        summary: "🚨 Solana node unhealthy"
+        description: |
+          Solana node is reporting unhealthy status.
+          Slots behind: {{ query "solana_node_num_slots_behind" | first | value }}
+
+          This will impact validator voting and performance.
+
+    - alert: SolanaNodeSlotsBehind
+      expr: solana_node_num_slots_behind > 100
+      for: 2m
+      labels:
+        severity: warning
+        service: solana-node
+        alert_type: sync
+      annotations:
+        summary: "⚠️ Solana node falling behind cluster"
+        description: |
+          Node is {{ $value }} slots behind the cluster.
+          This may impact voting performance and validator effectiveness.
+
+    - alert: SolanaNodeVersionOutdated
+      expr: solana_node_version_outdated == 1
+      for: 5m
+      labels:
+        severity: info
+        service: solana-node
+        alert_type: version
+      annotations:
+        summary: "📋 Solana node version outdated"
+        description: |
+          Current version: {{ $labels.current }}
+          Latest version: {{ $labels.latest }}
+
+          Consider upgrading to the latest version for optimal performance and security.
+
+  - name: solana-epoch-tracking
+    interval: 60s
+    rules:
+
+    # Epoch transition and credits summary
+    - alert: SolanaEpochTransition
+      expr: changes(solana_node_epoch_number[5m]) > 0
+      for: 0s
+      labels:
+        severity: info
+        service: solana-validator
+        alert_type: epoch_change
+      annotations:
+        summary: "🔄 New Solana epoch started: {{ $value }}"
+        description: |
+          Epoch {{ $value }} has started.
+          Previous epoch performance will be calculated and rewards distributed.
+
+          Monitor validator performance in the new epoch.
+
+    # Weekly performance summary (approximate)
+    - alert: SolanaValidatorWeeklyPerformance
+      expr: |
+        avg_over_time(solana_validator_credits_missed_pct[7d]) and
+        changes(solana_node_epoch_number[1h]) > 0
+      for: 0s
+      labels:
+        severity: info
+        service: solana-validator
+        alert_type: weekly_summary
+      annotations:
+        summary: "📊 Weekly validator performance summary"
+        description: |
+          Validator {{ $labels.nodekey }} average vote miss rate over 7 days: {{ printf "%.2f" $value }}%
+          Performance grade: {{ if lt $value 2 }}Excellent{{ else if lt $value 5 }}Good{{ else if lt $value 10 }}Fair{{ else }}Poor{{ end }}
+
+          Keep monitoring to maintain optimal performance.

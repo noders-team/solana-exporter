@@ -33,13 +33,25 @@ func main() {
 	}
 	collector := NewSolanaCollector(rpcClient, referenceRpcClient, config)
 	slotWatcher := NewSlotWatcher(rpcClient, config)
+	voteBatchAnalyzer := NewVoteBatchAnalyzer(rpcClient, config)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go slotWatcher.WatchSlots(ctx)
 
 	prometheus.MustRegister(collector)
-	http.Handle("/metrics", promhttp.Handler())
+
+	// Set up HTTP routes
+	mux := http.NewServeMux()
+
+	// Prometheus metrics endpoint
+	mux.Handle("/metrics", promhttp.Handler())
+
+	// Web UI setup
+	webUI := NewWebUI(collector, voteBatchAnalyzer, rpcClient, config)
+	webUI.RegisterHandlers(mux)
 
 	logger.Infof("listening on %s", config.ListenAddress)
-	logger.Fatal(http.ListenAndServe(config.ListenAddress, nil))
+	logger.Infof("Web UI available at http://%s", config.ListenAddress)
+	logger.Infof("Prometheus metrics at http://%s/metrics", config.ListenAddress)
+	logger.Fatal(http.ListenAndServe(config.ListenAddress, mux))
 }

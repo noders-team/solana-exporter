@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"slices"
 
@@ -51,16 +52,22 @@ type SolanaCollector struct {
 	ClusterRootSlot         *GaugeDesc
 	ValidatorDelinquent     *GaugeDesc
 	ClusterValidatorCount   *GaugeDesc
-	AccountBalances         *GaugeDesc
-	NodeVersion             *GaugeDesc
-	NodeIsHealthy           *GaugeDesc
-	NodeNumSlotsBehind      *GaugeDesc
-	NodeMinimumLedgerSlot   *GaugeDesc
-	NodeFirstAvailableBlock *GaugeDesc
-	NodeIdentity            *GaugeDesc
-	NodeIsActive            *GaugeDesc
-	ValidatorCommission     *GaugeDesc
-	NodeVersionOutdated     *GaugeDesc
+	ValidatorCommission      *GaugeDesc
+	ValidatorEpochCredits    *GaugeDesc
+	ValidatorExpectedCredits *GaugeDesc
+	ValidatorCreditsMissed   *GaugeDesc
+	AccountBalances          *GaugeDesc
+
+	// Vote batch analyzer
+	voteBatchAnalyzer        *VoteBatchAnalyzer
+	NodeVersion              *GaugeDesc
+	NodeIdentity             *GaugeDesc
+	NodeIsHealthy            *GaugeDesc
+	NodeNumSlotsBehind       *GaugeDesc
+	NodeMinimumLedgerSlot    *GaugeDesc
+	NodeFirstAvailableBlock  *GaugeDesc
+	NodeIsActive             *GaugeDesc
+	NodeVersionOutdated      *GaugeDesc
 }
 
 func NewSolanaCollector(rpcClient *rpc.Client, referenceRpcClient *rpc.Client, config *ExporterConfig) *SolanaCollector {
@@ -150,11 +157,27 @@ func NewSolanaCollector(rpcClient *rpc.Client, referenceRpcClient *rpc.Client, c
 			fmt.Sprintf("Validator commission, as a percentage (represented by %s and %s)", VotekeyLabel, NodekeyLabel),
 			VotekeyLabel, NodekeyLabel,
 		),
+		ValidatorEpochCredits: NewGaugeDesc(
+			"solana_validator_epoch_credits",
+			fmt.Sprintf("Vote credits earned by validator in current epoch (represented by %s, %s, and %s)", VotekeyLabel, NodekeyLabel, EpochLabel),
+			VotekeyLabel, NodekeyLabel, EpochLabel,
+		),
+		ValidatorExpectedCredits: NewGaugeDesc(
+			"solana_validator_expected_credits",
+			fmt.Sprintf("Expected vote credits for validator in current epoch (represented by %s, %s, and %s)", VotekeyLabel, NodekeyLabel, EpochLabel),
+			VotekeyLabel, NodekeyLabel, EpochLabel,
+		),
+		ValidatorCreditsMissed: NewGaugeDesc(
+			"solana_validator_credits_missed_pct",
+			fmt.Sprintf("Percentage of vote credits missed by validator in current epoch (represented by %s, %s, and %s)", VotekeyLabel, NodekeyLabel, EpochLabel),
+			VotekeyLabel, NodekeyLabel, EpochLabel,
+		),
 		NodeVersionOutdated: NewGaugeDesc(
 			"solana_node_version_outdated",
 			fmt.Sprintf("Whether the node version is outdated compared to reference RPC (1=outdated, 0=up-to-date), with %s and %s labels", CurrentVersionLabel, LatestVersionLabel),
 			CurrentVersionLabel, LatestVersionLabel,
 		),
+		voteBatchAnalyzer: NewVoteBatchAnalyzer(rpcClient, config),
 	}
 	return collector
 }
@@ -170,7 +193,14 @@ func (c *SolanaCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.ClusterRootSlot.Desc
 	ch <- c.ValidatorDelinquent.Desc
 	ch <- c.ClusterValidatorCount.Desc
+	ch <- c.ValidatorCommission.Desc
+	ch <- c.ValidatorEpochCredits.Desc
+	ch <- c.ValidatorExpectedCredits.Desc
+	ch <- c.ValidatorCreditsMissed.Desc
 	ch <- c.AccountBalances.Desc
+
+	// Vote batch analyzer descriptors
+	c.voteBatchAnalyzer.Describe(ch)
 	ch <- c.NodeIsHealthy.Desc
 	ch <- c.NodeNumSlotsBehind.Desc
 	ch <- c.NodeMinimumLedgerSlot.Desc
@@ -206,6 +236,12 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 		maxLastVote float64
 		maxRootSlot float64
 	)
+
+	// Get current epoch info for credits calculation
+	epochInfo, err := c.rpcClient.GetEpochInfo(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		c.logger.Errorf("failed to get epoch info for credits calculation: %v", err)
+	}
 	for _, account := range append(voteAccounts.Current, voteAccounts.Delinquent...) {
 		accounts := []string{account.VotePubkey, account.NodePubkey}
 		stake, lastVote, rootSlot, commission :=
@@ -219,6 +255,14 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 			ch <- c.ValidatorLastVote.MustNewConstMetric(lastVote, accounts...)
 			ch <- c.ValidatorRootSlot.MustNewConstMetric(rootSlot, accounts...)
 			ch <- c.ValidatorCommission.MustNewConstMetric(commission, accounts...)
+
+			// Collect vote credits metrics if epoch info is available
+			if epochInfo != nil {
+				c.collectVoteCreditsMetrics(ctx, ch, account, epochInfo, accounts...)
+			}
+
+			// Collect vote batch metrics for detailed TVC analysis
+			c.voteBatchAnalyzer.CollectVoteBatchMetrics(ctx, ch, account.NodePubkey, account.VotePubkey)
 		}
 
 		totalStake += stake
@@ -246,6 +290,60 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 	ch <- c.ClusterValidatorCount.MustNewConstMetric(float64(len(voteAccounts.Delinquent)), StateDelinquent)
 
 	c.logger.Info("Vote accounts collected.")
+}
+
+// collectVoteCreditsMetrics collects vote credits related metrics for a validator
+func (c *SolanaCollector) collectVoteCreditsMetrics(
+	ctx context.Context,
+	ch chan<- prometheus.Metric,
+	account rpc.VoteAccount,
+	epochInfo *rpc.EpochInfo,
+	labelValues ...string,
+) {
+	// Get detailed vote account data to access epoch credits
+	var voteAccountData rpc.VoteAccountData
+	_, err := rpc.GetAccountInfo(ctx, c.rpcClient, rpc.CommitmentFinalized, account.VotePubkey, &voteAccountData)
+	if err != nil {
+		c.logger.Errorf("failed to get vote account info for %s: %v", account.VotePubkey, err)
+		return
+	}
+
+	// Find credits for current epoch
+	var currentEpochCredits, previousEpochCredits int64
+	for _, credit := range voteAccountData.EpochCredits {
+		if credit.Epoch == epochInfo.Epoch {
+			// Convert string credits to int64
+			if credits, err := strconv.ParseInt(credit.Credits, 10, 64); err == nil {
+				currentEpochCredits = credits
+			}
+			if prevCredits, err := strconv.ParseInt(credit.PreviousCredits, 10, 64); err == nil {
+				previousEpochCredits = prevCredits
+			}
+			break
+		}
+	}
+
+	// Calculate credits earned this epoch
+	epochCreditsEarned := currentEpochCredits - previousEpochCredits
+
+	// Calculate expected credits based on slot progress in epoch
+	slotsInCurrentEpoch := epochInfo.SlotIndex + 1 // +1 because SlotIndex is 0-based
+	expectedCredits := slotsInCurrentEpoch // Ideally, 1 credit per slot
+
+	// Calculate percentage of credits missed
+	var creditsMissedPct float64
+	if expectedCredits > 0 {
+		creditsMissedPct = float64(expectedCredits-epochCreditsEarned) / float64(expectedCredits) * 100.0
+		if creditsMissedPct < 0 {
+			creditsMissedPct = 0 // Can't miss negative credits
+		}
+	}
+
+	// Emit metrics with epoch label
+	labelsWithEpoch := append(labelValues, fmt.Sprintf("%d", epochInfo.Epoch))
+	ch <- c.ValidatorEpochCredits.MustNewConstMetric(float64(epochCreditsEarned), labelsWithEpoch...)
+	ch <- c.ValidatorExpectedCredits.MustNewConstMetric(float64(expectedCredits), labelsWithEpoch...)
+	ch <- c.ValidatorCreditsMissed.MustNewConstMetric(creditsMissedPct, labelsWithEpoch...)
 }
 
 func (c *SolanaCollector) collectVersion(ctx context.Context, ch chan<- prometheus.Metric) {
@@ -408,6 +506,9 @@ func (c *SolanaCollector) Collect(ch chan<- prometheus.Metric) {
 	c.collectVersion(ctx, ch)
 	c.collectIdentity(ctx, ch)
 	c.collectBalances(ctx, ch)
+
+	// Collect vote batch metrics
+	c.voteBatchAnalyzer.Collect(ch)
 
 	c.logger.Info("=========== END COLLECTION ===========")
 }
