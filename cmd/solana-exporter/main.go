@@ -34,11 +34,14 @@ func main() {
 	collector := NewSolanaCollector(rpcClient, referenceRpcClient, config)
 	slotWatcher := NewSlotWatcher(rpcClient, config)
 	voteBatchAnalyzer := NewVoteBatchAnalyzer(rpcClient, config)
+	tvcHistoryManager := NewTVCHistoryManager(rpcClient, voteBatchAnalyzer, config)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go slotWatcher.WatchSlots(ctx)
+	go tvcHistoryManager.StartHistoryCollection(ctx)
 
 	prometheus.MustRegister(collector)
+	prometheus.MustRegister(tvcHistoryManager)
 
 	// Set up HTTP routes
 	mux := http.NewServeMux()
@@ -47,7 +50,7 @@ func main() {
 	mux.Handle("/metrics", promhttp.Handler())
 
 	// Web UI setup
-	webUI := NewWebUI(collector, voteBatchAnalyzer, rpcClient, config)
+	webUI := NewWebUI(collector, voteBatchAnalyzer, tvcHistoryManager, rpcClient, config)
 	webUI.RegisterHandlers(mux)
 
 	logger.Infof("listening on %s", config.ListenAddress)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 type WebUI struct {
 	collector          *SolanaCollector
 	voteBatchAnalyzer  *VoteBatchAnalyzer
+	tvcHistoryManager  *TVCHistoryManager
 	rpcClient          *rpc.Client
 	config             *ExporterConfig
 	logger             *zap.SugaredLogger
@@ -86,10 +88,11 @@ type FinancialData struct {
 	AccountBalances  map[string]float64 `json:"account_balances"`
 }
 
-func NewWebUI(collector *SolanaCollector, voteBatchAnalyzer *VoteBatchAnalyzer, rpcClient *rpc.Client, config *ExporterConfig) *WebUI {
+func NewWebUI(collector *SolanaCollector, voteBatchAnalyzer *VoteBatchAnalyzer, tvcHistoryManager *TVCHistoryManager, rpcClient *rpc.Client, config *ExporterConfig) *WebUI {
 	return &WebUI{
 		collector:         collector,
 		voteBatchAnalyzer: voteBatchAnalyzer,
+		tvcHistoryManager: tvcHistoryManager,
 		rpcClient:         rpcClient,
 		config:            config,
 		logger:            slog.Get(),
@@ -104,6 +107,8 @@ func (w *WebUI) RegisterHandlers(mux *http.ServeMux) {
 	mux.HandleFunc("/api/dashboard", w.handleAPIDashboard)
 	mux.HandleFunc("/api/health", w.handleAPIHealth)
 	mux.HandleFunc("/api/vote-batches", w.handleAPIVoteBatches)
+	mux.HandleFunc("/api/tvc-history", w.handleAPITVCHistory)
+	mux.HandleFunc("/api/epoch-summary", w.handleAPIEpochSummary)
 	mux.HandleFunc("/api/metrics/live", w.handleAPILiveMetrics)
 
 	// Static assets (embedded)
@@ -211,6 +216,66 @@ func (w *WebUI) handleAPIVoteBatches(writer http.ResponseWriter, request *http.R
 
 	writer.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(writer).Encode(batchData)
+}
+
+func (w *WebUI) handleAPITVCHistory(writer http.ResponseWriter, request *http.Request) {
+	// Parse query parameters
+	query := request.URL.Query()
+
+	req := HistoryQueryRequest{}
+
+	if epochStr := query.Get("epoch"); epochStr != "" {
+		if epoch, err := strconv.ParseInt(epochStr, 10, 64); err == nil {
+			req.Epoch = &epoch
+		}
+	}
+
+	if limitStr := query.Get("limit"); limitStr != "" {
+		if limit, err := strconv.Atoi(limitStr); err == nil {
+			req.Limit = &limit
+		}
+	}
+
+	// Get history data
+	historyData, err := w.tvcHistoryManager.GetHistoryData(req)
+	if err != nil {
+		w.logger.Errorf("Failed to get TVC history: %v", err)
+		http.Error(writer, "Failed to get TVC history", http.StatusInternalServerError)
+		return
+	}
+
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(writer).Encode(historyData)
+}
+
+func (w *WebUI) handleAPIEpochSummary(writer http.ResponseWriter, request *http.Request) {
+	// Get epoch summaries for the last 5 epochs
+	req := HistoryQueryRequest{
+		Limit: func() *int { l := 5; return &l }(),
+	}
+
+	historyData, err := w.tvcHistoryManager.GetHistoryData(req)
+	if err != nil {
+		w.logger.Errorf("Failed to get epoch summaries: %v", err)
+		http.Error(writer, "Failed to get epoch summaries", http.StatusInternalServerError)
+		return
+	}
+
+	// Return just the epoch summaries
+	response := struct {
+		CurrentEpoch     *EpochSummary   `json:"current_epoch"`
+		HistoricalEpochs []*EpochSummary `json:"historical_epochs"`
+		LastUpdate       time.Time       `json:"last_update"`
+	}{
+		CurrentEpoch:     historyData.CurrentEpoch,
+		HistoricalEpochs: historyData.HistoricalEpochs,
+		LastUpdate:       time.Now(),
+	}
+
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(writer).Encode(response)
 }
 
 func (w *WebUI) handleAPILiveMetrics(writer http.ResponseWriter, request *http.Request) {
@@ -430,6 +495,66 @@ func (w *WebUI) getDashboardHTML() string {
                                         </tr>
                                     </tbody>
                                 </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TVC History Section -->
+                <div class="dashboard-section">
+                    <h2>📈 TVC Performance History</h2>
+                    <div class="cards-grid cards-grid-2">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3>Current Epoch Progress</h3>
+                                <button class="btn btn-small" id="refresh-epoch">Refresh</button>
+                            </div>
+                            <div class="card-body">
+                                <div class="epoch-progress-container">
+                                    <div class="progress-bar">
+                                        <div class="progress-fill" id="epoch-progress-bar"></div>
+                                    </div>
+                                    <div class="epoch-stats">
+                                        <div class="stat-item">
+                                            <span class="label">Performance:</span>
+                                            <span class="value" id="current-performance">--%</span>
+                                        </div>
+                                        <div class="stat-item">
+                                            <span class="label">Grade:</span>
+                                            <span class="value grade" id="current-grade">--</span>
+                                        </div>
+                                        <div class="stat-item">
+                                            <span class="label">Missed TVCs:</span>
+                                            <span class="value" id="current-missed">--</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-header">
+                                <h3>Historical Performance (Last 5 Epochs)</h3>
+                            </div>
+                            <div class="card-body">
+                                <div class="table-container">
+                                    <table class="history-table" id="history-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Epoch</th>
+                                                <th>Performance</th>
+                                                <th>Grade</th>
+                                                <th>Missed TVCs</th>
+                                                <th>Duration</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="history-table-body">
+                                            <tr>
+                                                <td colspan="5" class="loading-cell">Loading history...</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -821,6 +946,91 @@ body {
     animation: pulse 2s infinite;
 }
 
+/* TVC History Styles */
+.cards-grid-2 {
+    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+}
+
+.epoch-progress-container {
+    padding: 1rem 0;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 20px;
+    background-color: var(--bg-tertiary);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 1rem;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--success-color), var(--info-color));
+    border-radius: 10px;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+.epoch-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1rem;
+}
+
+.stat-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem;
+    background-color: var(--bg-tertiary);
+    border-radius: 4px;
+}
+
+.stat-item .label {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+.stat-item .value {
+    font-weight: bold;
+    color: var(--text-primary);
+}
+
+.stat-item .value.grade {
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.875rem;
+}
+
+.grade-a-plus, .grade-a { background-color: var(--success-color); color: white; }
+.grade-b-plus, .grade-b { background-color: var(--info-color); color: white; }
+.grade-c-plus, .grade-c { background-color: var(--warning-color); color: black; }
+.grade-d, .grade-f { background-color: var(--error-color); color: white; }
+
+.history-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+}
+
+.history-table th,
+.history-table td {
+    padding: 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.history-table th {
+    background-color: var(--bg-tertiary);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.history-table td {
+    color: var(--text-secondary);
+}
+
 /* Utility Classes */
 .text-success { color: var(--success-color); }
 .text-warning { color: var(--warning-color); }
@@ -850,6 +1060,11 @@ class SolanaDashboard {
         if (refreshBtn) {
             refreshBtn.addEventListener('click', () => this.loadVoteBatches());
         }
+
+        const refreshEpochBtn = document.getElementById('refresh-epoch');
+        if (refreshEpochBtn) {
+            refreshEpochBtn.addEventListener('click', () => this.loadTVCHistory());
+        }
     }
 
     startAutoRefresh() {
@@ -863,7 +1078,8 @@ class SolanaDashboard {
     async loadInitialData() {
         await Promise.all([
             this.loadDashboardData(),
-            this.loadVoteBatches()
+            this.loadVoteBatches(),
+            this.loadTVCHistory()
         ]);
     }
 
@@ -955,6 +1171,76 @@ class SolanaDashboard {
         }).join('');
 
         tbody.innerHTML = rows;
+    }
+
+    async loadTVCHistory() {
+        try {
+            const response = await fetch('/api/epoch-summary');
+            const data = await response.json();
+
+            this.updateEpochProgress(data.current_epoch);
+            this.updateHistoryTable(data.historical_epochs);
+        } catch (error) {
+            console.error('Failed to load TVC history:', error);
+        }
+    }
+
+    updateEpochProgress(currentEpoch) {
+        if (!currentEpoch) return;
+
+        // Update progress bar
+        const progressBar = document.getElementById('epoch-progress-bar');
+        if (progressBar) {
+            const progress = (currentEpoch.history_points.length > 0) ?
+                currentEpoch.history_points[currentEpoch.history_points.length - 1].epoch_progress : 0;
+            progressBar.style.width = progress + '%';
+        }
+
+        // Update stats
+        this.updateElement('current-performance', currentEpoch.performance_percent.toFixed(1) + '%');
+        this.updateElement('current-grade', currentEpoch.grade || '--');
+        this.updateElement('current-missed', this.formatNumber(currentEpoch.missed_credits));
+
+        // Update grade styling
+        const gradeElement = document.getElementById('current-grade');
+        if (gradeElement && currentEpoch.grade) {
+            gradeElement.className = 'value grade grade-' + currentEpoch.grade.toLowerCase().replace('+', '-plus');
+        }
+    }
+
+    updateHistoryTable(historicalEpochs) {
+        const tbody = document.getElementById('history-table-body');
+        if (!tbody) return;
+
+        if (!historicalEpochs || historicalEpochs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="loading-cell">No historical data available</td></tr>';
+            return;
+        }
+
+        const rows = historicalEpochs.slice(0, 5).map(epoch => {
+            const duration = this.formatDuration(epoch.duration);
+            const gradeClass = 'grade-' + epoch.grade.toLowerCase().replace('+', '-plus');
+
+            return '<tr>' +
+                '<td>' + epoch.epoch + '</td>' +
+                '<td class="' + this.getPerformanceClass(epoch.performance_percent) + '">' + epoch.performance_percent.toFixed(1) + '%</td>' +
+                '<td><span class="grade ' + gradeClass + '">' + epoch.grade + '</span></td>' +
+                '<td>' + this.formatNumber(epoch.missed_credits) + '</td>' +
+                '<td>' + duration + '</td>' +
+                '</tr>';
+        }).join('');
+
+        tbody.innerHTML = rows;
+    }
+
+    formatDuration(durationNs) {
+        // Convert nanoseconds to hours
+        const hours = Math.round(durationNs / 1000000000 / 3600 * 10) / 10;
+        if (hours < 1) {
+            const minutes = Math.round(durationNs / 1000000000 / 60);
+            return minutes + 'm';
+        }
+        return hours + 'h';
     }
 
     updateElement(id, value) {

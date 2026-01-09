@@ -1,0 +1,103 @@
+# Solana Exporter Environment Configuration
+# Copy this file to ~/.env and configure your values
+
+# ===== VALIDATOR CONFIGURATION =====
+# Your validator's identity public key (required)
+NODEKEY=YOUR_VALIDATOR_IDENTITY_PUBKEY_HERE
+
+# Your validator's vote account public key (required)
+VOTEKEY=YOUR_VALIDATOR_VOTE_ACCOUNT_PUBKEY_HERE
+
+# Active identity for consensus participation tracking (optional)
+ACTIVE_IDENTITY=YOUR_VALIDATOR_IDENTITY_PUBKEY_HERE
+
+# ===== NETWORK CONFIGURATION =====
+# Local Solana RPC endpoint (required)
+RPC_URL=http://localhost:8899
+
+# Reference RPC for version comparison (optional)
+REFERENCE_RPC_URL=https://api.mainnet-beta.solana.com
+
+# Web UI and metrics listen address (default: :8080)
+LISTEN_ADDRESS=:8080
+
+# ===== MONITORING CONFIGURATION =====
+# Balance addresses to monitor (comma-separated, optional)
+BALANCE_ADDRESS=YOUR_TREASURY_WALLET_ADDRESS,YOUR_OPERATIONAL_WALLET_ADDRESS
+
+# Additional validator keys for multi-validator monitoring (optional)
+# ADDITIONAL_NODEKEYS=VALIDATOR_2_IDENTITY,VALIDATOR_3_IDENTITY
+# ADDITIONAL_VOTEKEYS=VALIDATOR_2_VOTEKEY,VALIDATOR_3_VOTEKEY
+
+# ===== PERFORMANCE SETTINGS =====
+# HTTP timeout for RPC calls (default: 60)
+HTTP_TIMEOUT=60
+
+# Slot monitoring pace in seconds (default: 1)
+SLOT_PACE=1
+
+# Epoch cleanup time in seconds (default: 60)
+EPOCH_CLEANUP_TIME=60
+
+# ===== FEATURE FLAGS =====
+# Enable comprehensive slot tracking (WARNING: high resource usage)
+# COMPREHENSIVE_SLOT_TRACKING=true
+
+# Enable comprehensive vote account tracking (medium resource usage)
+COMPREHENSIVE_VOTE_ACCOUNT_TRACKING=true
+
+# Enable block size monitoring (medium resource usage)
+MONITOR_BLOCK_SIZES=true
+
+# Enable light mode (minimal metrics, good for resource-constrained environments)
+# LIGHT_MODE=true
+
+# ===== WEB UI CONFIGURATION =====
+# Web UI is automatically enabled on LISTEN_ADDRESS
+# Access your dashboard at: http://your-server:8080
+
+# API endpoints available:
+# http://your-server:8080/              - Main dashboard
+# http://your-server:8080/health        - Health check page
+# http://your-server:8080/metrics       - Prometheus metrics
+# http://your-server:8080/api/dashboard - JSON dashboard data
+# http://your-server:8080/api/vote-batches - Vote batch analysis
+
+# ===== EXAMPLE CONFIGURATIONS =====
+
+# Single Validator (Minimal Setup):
+# NODEKEY=7Np41oeYqPeNDHae1o1DKBUoXJqMKd7KZaMGPcheJ3Ux
+# VOTEKEY=84hoQQ9M4F8kcF6ggdGgMq4FxGrHbLNZFwsLKWFabjzB
+# RPC_URL=http://localhost:8899
+# LISTEN_ADDRESS=:8080
+
+# Multi-Validator (Advanced Setup):
+# NODEKEY=VALIDATOR_1_IDENTITY,VALIDATOR_2_IDENTITY
+# VOTEKEY=VALIDATOR_1_VOTEKEY,VALIDATOR_2_VOTEKEY
+# COMPREHENSIVE_VOTE_ACCOUNT_TRACKING=true
+# MONITOR_BLOCK_SIZES=true
+# BALANCE_ADDRESS=TREASURY_WALLET,OPERATIONAL_WALLET
+
+# Production (High Performance):
+# NODEKEY=YOUR_IDENTITY
+# VOTEKEY=YOUR_VOTEKEY
+# RPC_URL=http://localhost:8899
+# REFERENCE_RPC_URL=https://api.mainnet-beta.solana.com
+# COMPREHENSIVE_VOTE_ACCOUNT_TRACKING=true
+# MONITOR_BLOCK_SIZES=true
+# HTTP_TIMEOUT=30
+# LISTEN_ADDRESS=:8080
+
+# ===== SECURITY NOTES =====
+# - Keep this file secure (chmod 600 recommended)
+# - Never commit real keys to version control
+# - Use environment-specific configurations
+# - Consider using systemd credentials for production
+
+# ===== TROUBLESHOOTING =====
+# If you experience issues:
+# 1. Check RPC_URL accessibility: curl $RPC_URL -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+# 2. Verify validator keys are correct
+# 3. Check firewall settings for LISTEN_ADDRESS port
+# 4. Monitor logs: journalctl -u solana-exporter -f
+# 5. Test Web UI: curl http://localhost:8080/health

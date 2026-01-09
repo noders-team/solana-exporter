@@ -1,0 +1,56 @@
+[Unit]
+Description=Solana Exporter with Web UI
+Documentation=https://github.com/noders-team/solana-exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=solana
+Group=solana
+WorkingDirectory=/home/solana/solana-exporter
+
+# Environment configuration
+EnvironmentFile=/home/solana/.env
+
+# Enhanced startup command with Web UI support
+ExecStart=/home/solana/solana-exporter/solana-exporter \
+  -nodekey "$NODEKEY" \
+  -votekey "$VOTEKEY" \
+  -active-identity "$ACTIVE_IDENTITY" \
+  -balance-address "$BALANCE_ADDRESS" \
+  -monitor-block-sizes \
+  -comprehensive-vote-account-tracking \
+  -rpc-url "$RPC_URL" \
+  -listen-address ":8080" \
+  -reference-rpc-url "https://api.mainnet-beta.solana.com"
+
+# Service management
+Restart=always
+RestartSec=5s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/solana/solana-exporter
+ReadOnlyPaths=/home/solana/.env
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=solana-exporter
+
+# Process management
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
