@@ -154,13 +154,14 @@ WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=/home/$USER/.env
 
 # Enhanced startup command with Web UI support
+# NOTE: comprehensive-vote-account-tracking removed to prevent alert spam
+# Add it manually only if you need network-wide analytics
 ExecStart=$INSTALL_DIR/solana-exporter \\
   -nodekey "\$NODEKEY" \\
   -votekey "\$VOTEKEY" \\
   -active-identity "\$ACTIVE_IDENTITY" \\
   -balance-address "\$BALANCE_ADDRESS" \\
   -monitor-block-sizes \\
-  -comprehensive-vote-account-tracking \\
   -rpc-url "\$RPC_URL" \\
   -listen-address "\${LISTEN_ADDRESS:-:8080}" \\
   -reference-rpc-url "\${REFERENCE_RPC_URL:-https://api.mainnet-beta.solana.com}"
@@ -252,6 +253,10 @@ show_status() {
     echo "🌐 Web UI will be available at: http://your-server:8080"
     echo "📊 Prometheus metrics: http://your-server:8080/metrics"
     echo "💚 Health check: http://your-server:8080/health"
+    echo
+    echo "⚠️  IMPORTANT: Service configured for YOUR validators only"
+    echo "   To monitor ALL network validators, add: -comprehensive-vote-account-tracking"
+    echo "   (Warning: this will create alerts for ALL delinquent validators in network)"
     echo
     echo "📋 Next steps:"
     echo "1. Edit /home/$USER/.env with your validator keys"

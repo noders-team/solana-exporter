@@ -12,12 +12,14 @@ To use the Solana Exporter, simply run the program with the desired
 ```shell
 solana-exporter \
   -nodekey <VALIDATOR_IDENTITY_1> -nodekey <VALIDATOR_IDENTITY_2> \
-  -votekey <VALIDATOR_VOTEKEY_1> -votekey <UNSTAKED_VALIDATOR_VOTEKEY_1> \
+  -votekey <VALIDATOR_VOTEKEY_1> -votekey <VALIDATOR_VOTEKEY_1> \
   -balance-address <ADDRESS_1> -balance-address <ADDRESS_2> \
   -comprehensive-slot-tracking \
-  -monitor-block-sizes
+  -monitor-block-sizes \
   -active-identity <MY_ACTIVE_IDENTITY>
 ```
+
+⚠️ **Note**: `-comprehensive-vote-account-tracking` removed from example to prevent alert spam. Add only if you need network-wide analytics and can handle alerts from all delinquent validators.
 
 **🌐 NEW: Built-in Web UI**
 ```shell
@@ -88,6 +90,8 @@ Additionally, [vote credits alerting rules](prometheus/solana-vote-credits-rules
 validator voting performance and detect potential issues early.
 
 The **built-in web dashboard** provides instant access to vote credits analysis without requiring Grafana setup.
+
+⚠️ **IMPORTANT**: Be careful with `-comprehensive-vote-account-tracking` flag - it monitors ALL validators in the network (1,900+) and can trigger alerts for every delinquent validator. See [Troubleshooting Guide](TROUBLESHOOTING_DELINQUENT_ALERTS.md) for details.
 
 #### Active/Passive Monitoring
 

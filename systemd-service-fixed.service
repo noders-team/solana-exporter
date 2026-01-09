@@ -1,0 +1,56 @@
+[Unit]
+Description=Solana Exporter with Web UI (Fixed - No Comprehensive Tracking)
+Documentation=https://github.com/noders-team/solana-exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=solana
+Group=solana
+WorkingDirectory=/home/solana/solana-exporter
+
+# Environment configuration
+EnvironmentFile=/home/solana/.env
+
+# Fixed startup command WITHOUT comprehensive-vote-account-tracking
+# This prevents monitoring ALL validators in the network (which causes delinquent alerts)
+ExecStart=/home/solana/solana-exporter/solana-exporter \
+  -nodekey "${NODEKEY}" \
+  -votekey "${VOTEKEY}" \
+  -active-identity "${ACTIVE_IDENTITY}" \
+  -balance-address "${BALANCE_ADDRESS}" \
+  -monitor-block-sizes \
+  -rpc-url "${RPC_URL}" \
+  -listen-address "${LISTEN_ADDRESS}" \
+  -reference-rpc-url "${REFERENCE_RPC_URL}"
+
+# Service management
+Restart=always
+RestartSec=5s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/solana/solana-exporter
+ReadOnlyPaths=/home/solana/.env
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=solana-exporter
+
+# Process management
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

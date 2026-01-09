@@ -44,7 +44,10 @@ EPOCH_CLEANUP_TIME=60
 # COMPREHENSIVE_SLOT_TRACKING=true
 
 # Enable comprehensive vote account tracking (medium resource usage)
-COMPREHENSIVE_VOTE_ACCOUNT_TRACKING=true
+# WARNING: This monitors ALL validators in network (~1,900) and will trigger
+# alerts for EVERY delinquent validator. Only enable if you need network-wide
+# analytics and can handle alert spam. For most users, keep this disabled.
+# COMPREHENSIVE_VOTE_ACCOUNT_TRACKING=true
 
 # Enable block size monitoring (medium resource usage)
 MONITOR_BLOCK_SIZES=true
@@ -74,9 +77,9 @@ MONITOR_BLOCK_SIZES=true
 # Multi-Validator (Advanced Setup):
 # NODEKEY=VALIDATOR_1_IDENTITY,VALIDATOR_2_IDENTITY
 # VOTEKEY=VALIDATOR_1_VOTEKEY,VALIDATOR_2_VOTEKEY
-# COMPREHENSIVE_VOTE_ACCOUNT_TRACKING=true
 # MONITOR_BLOCK_SIZES=true
 # BALANCE_ADDRESS=TREASURY_WALLET,OPERATIONAL_WALLET
+# Note: comprehensive tracking removed to prevent alert spam
 
 # Production (High Performance):
 # NODEKEY=YOUR_IDENTITY
