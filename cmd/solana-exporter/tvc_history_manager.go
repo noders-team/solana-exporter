@@ -69,6 +69,43 @@ type (
 		MaxVoteLag         int64                `json:"max_vote_lag"`
 		UptimePercent      float64              `json:"uptime_percent"`
 		Grade              string               `json:"grade"` // A+, A, B, C, D, F
+		// NEW: Vote batch historical data
+		VoteBatches        []VoteBatchHistory   `json:"vote_batches"`
+		BatchTrends        BatchTrendAnalysis   `json:"batch_trends"`
+	}
+
+	// VoteBatchHistory represents a saved vote batch with timestamp
+	VoteBatchHistory struct {
+		Timestamp       time.Time `json:"timestamp"`
+		Slot            int64     `json:"slot"`
+		Epoch           int64     `json:"epoch"`
+		BatchID         int       `json:"batch_id"`
+		StartSlot       int64     `json:"start_slot"`
+		EndSlot         int64     `json:"end_slot"`
+		SlotRange       string    `json:"slot_range"`
+		TotalSlots      int64     `json:"total_slots"`
+		VotedSlots      int64     `json:"voted_slots"`
+		MissedSlots     int64     `json:"missed_slots"`
+		MissedTVCs      int64     `json:"missed_tvcs"`
+		Performance     float64   `json:"performance"`
+		AvgLatency      float64   `json:"avg_latency"`
+		VoteCount       int       `json:"vote_count"`
+		IsComplete      bool      `json:"is_complete"`
+		GapFromPrevious int64     `json:"gap_from_previous"`
+	}
+
+	// BatchTrendAnalysis contains trend analysis for vote batches
+	BatchTrendAnalysis struct {
+		TotalBatches        int     `json:"total_batches"`
+		AvgBatchPerformance float64 `json:"avg_batch_performance"`
+		AvgBatchLatency     float64 `json:"avg_batch_latency"`
+		AvgBatchSize        float64 `json:"avg_batch_size"`
+		AvgGapBetweenBatch  float64 `json:"avg_gap_between_batches"`
+		PerfectBatches      int     `json:"perfect_batches"`      // 100% performance
+		PoorBatches         int     `json:"poor_batches"`         // <90% performance
+		HighLatencyBatches  int     `json:"high_latency_batches"` // >10s latency
+		TrendDirection      string  `json:"trend_direction"`      // improving, degrading, stable
+		LastAnalyzedSlot    int64   `json:"last_analyzed_slot"`
 	}
 
 	// TVCHistoryManager manages TVC data collection and storage
@@ -85,6 +122,11 @@ type (
 		lastStoredSlot    int64
 		lastSaveTime      time.Time
 
+		// NEW: Batch caching and persistence
+		cachedBatches     []VoteBatchHistory
+		lastBatchSlot     int64
+		batchSaveInterval time.Duration
+
 		// Synchronization
 		mu                sync.RWMutex
 
@@ -92,6 +134,9 @@ type (
 		TVCHistoryPoints      *prometheus.GaugeVec
 		EpochPerformanceGrade *prometheus.GaugeVec
 		HistoryStorageSize    prometheus.Gauge
+		// NEW: Batch metrics
+		BatchHistoryCount     *prometheus.GaugeVec
+		BatchTrendMetrics     *prometheus.GaugeVec
 	}
 
 	// HistoryQueryRequest for API requests
@@ -109,6 +154,20 @@ type (
 		RealtimePoints   []TVCHistoryPoint  `json:"realtime_points"`
 		TotalPoints      int                `json:"total_points"`
 		LastUpdate       time.Time          `json:"last_update"`
+		// NEW: Batch data in response
+		RecentBatches    []VoteBatchHistory `json:"recent_batches"`
+		BatchTrends      *BatchTrendAnalysis `json:"batch_trends"`
+		TotalBatches     int                 `json:"total_batches"`
+	}
+
+	// BatchQueryRequest for batch-specific API requests
+	BatchQueryRequest struct {
+		Epoch      *int64 `json:"epoch,omitempty"`
+		StartSlot  *int64 `json:"start_slot,omitempty"`
+		EndSlot    *int64 `json:"end_slot,omitempty"`
+		Limit      *int   `json:"limit,omitempty"`
+		MinPerf    *float64 `json:"min_performance,omitempty"`
+		MaxLatency *float64 `json:"max_latency,omitempty"`
 	}
 )
 
@@ -123,6 +182,9 @@ func NewTVCHistoryManager(rpcClient *rpc.Client, voteBatchAnalyzer *VoteBatchAna
 		historicalEpochs:  make(map[int64]*EpochSummary),
 		realtimePoints:    make([]TVCHistoryPoint, 0, MaxHistoryPointsInMemory),
 		lastSaveTime:      time.Now(),
+		// NEW: Initialize batch storage
+		cachedBatches:     make([]VoteBatchHistory, 0, 500), // Cache last 500 batches
+		batchSaveInterval: 10 * time.Minute,                 // Save batches every 10 minutes
 
 		// Prometheus metrics
 		TVCHistoryPoints: prometheus.NewGaugeVec(
@@ -146,6 +208,23 @@ func NewTVCHistoryManager(rpcClient *rpc.Client, voteBatchAnalyzer *VoteBatchAna
 				Name: "solana_tvc_history_storage_size_bytes",
 				Help: "Size of TVC history storage on disk in bytes",
 			},
+		),
+
+		// NEW: Batch metrics
+		BatchHistoryCount: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "solana_vote_batch_history_count",
+				Help: "Number of vote batches stored in history",
+			},
+			[]string{"nodekey", "votekey", "epoch"},
+		),
+
+		BatchTrendMetrics: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "solana_vote_batch_trends",
+				Help: "Vote batch trend analysis metrics",
+			},
+			[]string{"nodekey", "votekey", "metric_type"},
 		),
 	}
 
@@ -172,6 +251,10 @@ func (t *TVCHistoryManager) StartHistoryCollection(ctx context.Context) {
 	saveTicker := time.NewTicker(SaveInterval)
 	defer saveTicker.Stop()
 
+	// NEW: Batch collection ticker - every 2 minutes
+	batchTicker := time.NewTicker(2 * time.Minute)
+	defer batchTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -184,7 +267,116 @@ func (t *TVCHistoryManager) StartHistoryCollection(ctx context.Context) {
 
 		case <-saveTicker.C:
 			t.saveToDisk()
+
+		case <-batchTicker.C:
+			t.collectAndStoreBatches(ctx)
 		}
+	}
+}
+
+// collectAndStoreBatches collects current vote batches and stores them
+func (t *TVCHistoryManager) collectAndStoreBatches(ctx context.Context) {
+	if len(t.config.Nodekeys) == 0 || len(t.config.Votekeys) == 0 {
+		return
+	}
+
+	nodekey := t.config.Nodekeys[0]
+	votekey := t.config.Votekeys[0]
+
+	// Get current slot and epoch info
+	currentSlot, err := t.rpcClient.GetSlot(ctx, rpc.CommitmentConfirmed)
+	if err != nil {
+		t.logger.Errorf("Failed to get current slot for batch collection: %v", err)
+		return
+	}
+
+	epochInfo, err := t.rpcClient.GetEpochInfo(ctx, rpc.CommitmentFinalized)
+	if err != nil {
+		t.logger.Errorf("Failed to get epoch info for batch collection: %v", err)
+		return
+	}
+
+	// Get vote account data
+	var voteAccountData rpc.VoteAccountData
+	_, err = rpc.GetAccountInfo(ctx, t.rpcClient, rpc.CommitmentFinalized, votekey, &voteAccountData)
+	if err != nil {
+		t.logger.Errorf("Failed to get vote account data for batch collection: %v", err)
+		return
+	}
+
+	// Analyze vote batches
+	batches, err := t.voteBatchAnalyzer.AnalyzeVoteBatches(ctx, &voteAccountData, nodekey, votekey)
+	if err != nil {
+		t.logger.Errorf("Failed to analyze vote batches: %v", err)
+		return
+	}
+
+	// Convert and store batches
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := time.Now()
+	var newBatches []VoteBatchHistory
+
+	for _, batch := range batches {
+		// Only store batches that we haven't seen before
+		if batch.EndSlot > t.lastBatchSlot {
+			gapFromPrevious := int64(0)
+			if len(t.cachedBatches) > 0 {
+				lastBatch := t.cachedBatches[len(t.cachedBatches)-1]
+				gapFromPrevious = batch.StartSlot - lastBatch.EndSlot
+			}
+
+			batchHistory := VoteBatchHistory{
+				Timestamp:       now,
+				Slot:            currentSlot,
+				Epoch:           epochInfo.Epoch,
+				BatchID:         batch.ID,
+				StartSlot:       batch.StartSlot,
+				EndSlot:         batch.EndSlot,
+				SlotRange:       batch.SlotRange,
+				TotalSlots:      batch.TotalSlots,
+				VotedSlots:      batch.VotedSlots,
+				MissedSlots:     batch.MissedSlots,
+				MissedTVCs:      batch.MissedTVCs,
+				Performance:     batch.Performance,
+				AvgLatency:      batch.AvgLatency,
+				VoteCount:       len(batch.Votes),
+				IsComplete:      batch.EndSlot < currentSlot-10, // Complete if batch is behind current slot
+				GapFromPrevious: gapFromPrevious,
+			}
+
+			newBatches = append(newBatches, batchHistory)
+		}
+	}
+
+	// Add new batches to cache
+	t.cachedBatches = append(t.cachedBatches, newBatches...)
+
+	// Maintain cache size limit
+	if len(t.cachedBatches) > 500 {
+		// Keep only the latest 500 batches
+		copy(t.cachedBatches, t.cachedBatches[len(t.cachedBatches)-500:])
+		t.cachedBatches = t.cachedBatches[:500]
+	}
+
+	// Update last batch slot
+	if len(batches) > 0 {
+		t.lastBatchSlot = batches[len(batches)-1].EndSlot
+	}
+
+	// Add batches to current epoch
+	if t.currentEpochData != nil && epochInfo.Epoch == t.currentEpochData.Epoch {
+		t.currentEpochData.VoteBatches = append(t.currentEpochData.VoteBatches, newBatches...)
+	}
+
+	// Emit batch metrics
+	t.emitBatchMetrics(newBatches, nodekey, votekey)
+
+	if len(newBatches) > 0 {
+		t.logger.Infof("Stored %d new vote batches (epoch %d, slots %d-%d)",
+			len(newBatches), epochInfo.Epoch,
+			newBatches[0].StartSlot, newBatches[len(newBatches)-1].EndSlot)
 	}
 }
 
@@ -356,26 +548,96 @@ func (t *TVCHistoryManager) startNewEpoch(epochInfo *rpc.EpochInfo, firstPoint T
 	t.logger.Infof("Started tracking new epoch %d", epochInfo.Epoch)
 }
 
-// finalizeCurrentEpoch completes the current epoch and archives it
-func (t *TVCHistoryManager) finalizeCurrentEpoch() {
-	if t.currentEpochData == nil {
-		return
+	// finalizeCurrentEpoch completes the current epoch and archives it
+	func (t *TVCHistoryManager) finalizeCurrentEpoch() {
+		if t.currentEpochData == nil {
+			return
+		}
+
+		// Calculate final epoch statistics
+		t.calculateEpochStatistics(t.currentEpochData)
+
+		// NEW: Calculate batch trend analysis for the epoch
+		t.currentEpochData.BatchTrends = t.calculateBatchTrends(t.currentEpochData.VoteBatches)
+
+		// Archive the epoch
+		t.historicalEpochs[t.currentEpochData.Epoch] = t.currentEpochData
+
+		// Clean up old epochs (keep only last 5)
+		t.cleanupOldEpochs()
+
+		t.logger.Infof("Finalized epoch %d: %.2f%% performance (%s grade), %d batches analyzed",
+			t.currentEpochData.Epoch,
+			t.currentEpochData.PerformancePercent,
+			t.currentEpochData.Grade,
+			len(t.currentEpochData.VoteBatches))
 	}
 
-	// Calculate final epoch statistics
-	t.calculateEpochStatistics(t.currentEpochData)
+	// calculateBatchTrends analyzes batch trends for an epoch
+	func (t *TVCHistoryManager) calculateBatchTrends(batches []VoteBatchHistory) BatchTrendAnalysis {
+		if len(batches) == 0 {
+			return BatchTrendAnalysis{TrendDirection: "no_data"}
+		}
 
-	// Archive the epoch
-	t.historicalEpochs[t.currentEpochData.Epoch] = t.currentEpochData
+		trends := BatchTrendAnalysis{
+			TotalBatches: len(batches),
+		}
 
-	// Clean up old epochs (keep only last 5)
-	t.cleanupOldEpochs()
+		// Calculate averages
+		var totalPerformance, totalLatency, totalSize, totalGap float64
+		var perfectCount, poorCount, highLatencyCount int
 
-	t.logger.Infof("Finalized epoch %d: %.2f%% performance (%s grade)",
-		t.currentEpochData.Epoch,
-		t.currentEpochData.PerformancePercent,
-		t.currentEpochData.Grade)
-}
+		for i, batch := range batches {
+			totalPerformance += batch.Performance
+			totalLatency += batch.AvgLatency
+			totalSize += float64(batch.TotalSlots)
+
+			if i > 0 {
+				totalGap += float64(batch.GapFromPrevious)
+			}
+
+			if batch.Performance >= 100.0 {
+				perfectCount++
+			} else if batch.Performance < 90.0 {
+				poorCount++
+			}
+
+			if batch.AvgLatency > 10.0 {
+				highLatencyCount++
+			}
+
+			trends.LastAnalyzedSlot = batch.EndSlot
+		}
+
+		trends.AvgBatchPerformance = totalPerformance / float64(len(batches))
+		trends.AvgBatchLatency = totalLatency / float64(len(batches))
+		trends.AvgBatchSize = totalSize / float64(len(batches))
+		trends.PerfectBatches = perfectCount
+		trends.PoorBatches = poorCount
+		trends.HighLatencyBatches = highLatencyCount
+
+		if len(batches) > 1 {
+			trends.AvgGapBetweenBatch = totalGap / float64(len(batches)-1)
+		}
+
+		// Determine trend direction (simple analysis)
+		if len(batches) >= 3 {
+			recentPerf := (batches[len(batches)-1].Performance + batches[len(batches)-2].Performance) / 2
+			olderPerf := (batches[0].Performance + batches[1].Performance) / 2
+
+			if recentPerf > olderPerf+2 {
+				trends.TrendDirection = "improving"
+			} else if recentPerf < olderPerf-2 {
+				trends.TrendDirection = "degrading"
+			} else {
+				trends.TrendDirection = "stable"
+			}
+		} else {
+			trends.TrendDirection = "insufficient_data"
+		}
+
+		return trends
+	}
 
 // calculateEpochStatistics computes final statistics for an epoch
 func (t *TVCHistoryManager) calculateEpochStatistics(epoch *EpochSummary) {
@@ -487,22 +749,52 @@ func (t *TVCHistoryManager) cleanupOldEpochs() {
 	}
 }
 
-// emitHistoryMetrics emits Prometheus metrics for TVC history
-func (t *TVCHistoryManager) emitHistoryMetrics(point TVCHistoryPoint, nodekey, votekey string) {
-	epochStr := fmt.Sprintf("%d", point.Epoch)
+	// emitHistoryMetrics emits Prometheus metrics for TVC history
+	func (t *TVCHistoryManager) emitHistoryMetrics(point TVCHistoryPoint, nodekey, votekey string) {
+		epochStr := fmt.Sprintf("%d", point.Epoch)
 
-	// Emit various metrics
-	t.TVCHistoryPoints.WithLabelValues(nodekey, votekey, epochStr, "performance").Set(point.Performance)
-	t.TVCHistoryPoints.WithLabelValues(nodekey, votekey, epochStr, "vote_lag").Set(float64(point.VoteLag))
-	t.TVCHistoryPoints.WithLabelValues(nodekey, votekey, epochStr, "missed_percent").Set(point.MissedPercent)
-	t.TVCHistoryPoints.WithLabelValues(nodekey, votekey, epochStr, "epoch_progress").Set(point.EpochProgress)
+		// Emit various metrics
+		t.TVCHistoryPoints.WithLabelValues(nodekey, votekey, epochStr, "performance").Set(point.Performance)
+		t.TVCHistoryPoints.WithLabelValues(nodekey, votekey, epochStr, "vote_lag").Set(float64(point.VoteLag))
+		t.TVCHistoryPoints.WithLabelValues(nodekey, votekey, epochStr, "missed_percent").Set(point.MissedPercent)
+		t.TVCHistoryPoints.WithLabelValues(nodekey, votekey, epochStr, "epoch_progress").Set(point.EpochProgress)
 
-	// Emit epoch grade if epoch is complete
-	if t.currentEpochData != nil && t.currentEpochData.Grade != "" {
-		gradeValue := t.gradeToFloat(t.currentEpochData.Grade)
-		t.EpochPerformanceGrade.WithLabelValues(nodekey, votekey, epochStr, t.currentEpochData.Grade).Set(gradeValue)
+		// Emit epoch grade if epoch is complete
+		if t.currentEpochData != nil && t.currentEpochData.Grade != "" {
+			gradeValue := t.gradeToFloat(t.currentEpochData.Grade)
+			t.EpochPerformanceGrade.WithLabelValues(nodekey, votekey, epochStr, t.currentEpochData.Grade).Set(gradeValue)
+		}
 	}
-}
+
+	// emitBatchMetrics emits Prometheus metrics for vote batches
+	func (t *TVCHistoryManager) emitBatchMetrics(batches []VoteBatchHistory, nodekey, votekey string) {
+		if len(batches) == 0 {
+			return
+		}
+
+		// Count batches by epoch
+		epochCounts := make(map[int64]int)
+		for _, batch := range batches {
+			epochCounts[batch.Epoch]++
+		}
+
+		// Emit batch counts per epoch
+		for epoch, count := range epochCounts {
+			t.BatchHistoryCount.WithLabelValues(nodekey, votekey, fmt.Sprintf("%d", epoch)).Set(float64(count))
+		}
+
+		// Calculate and emit trend metrics
+		if t.currentEpochData != nil && len(t.currentEpochData.VoteBatches) > 0 {
+			trends := t.calculateBatchTrends(t.currentEpochData.VoteBatches)
+
+			t.BatchTrendMetrics.WithLabelValues(nodekey, votekey, "avg_performance").Set(trends.AvgBatchPerformance)
+			t.BatchTrendMetrics.WithLabelValues(nodekey, votekey, "avg_latency").Set(trends.AvgBatchLatency)
+			t.BatchTrendMetrics.WithLabelValues(nodekey, votekey, "avg_size").Set(trends.AvgBatchSize)
+			t.BatchTrendMetrics.WithLabelValues(nodekey, votekey, "perfect_batches").Set(float64(trends.PerfectBatches))
+			t.BatchTrendMetrics.WithLabelValues(nodekey, votekey, "poor_batches").Set(float64(trends.PoorBatches))
+			t.BatchTrendMetrics.WithLabelValues(nodekey, votekey, "high_latency_batches").Set(float64(trends.HighLatencyBatches))
+		}
+	}
 
 // gradeToFloat converts letter grade to numeric value for metrics
 func (t *TVCHistoryManager) gradeToFloat(grade string) float64 {
@@ -534,49 +826,124 @@ func (t *TVCHistoryManager) gradeToFloat(grade string) float64 {
 	}
 }
 
-// GetHistoryData returns TVC history data for API requests
-func (t *TVCHistoryManager) GetHistoryData(req HistoryQueryRequest) (*HistoryResponse, error) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+	// GetHistoryData returns TVC history data for API requests
+	func (t *TVCHistoryManager) GetHistoryData(req HistoryQueryRequest) (*HistoryResponse, error) {
+		t.mu.RLock()
+		defer t.mu.RUnlock()
 
-	response := &HistoryResponse{
-		CurrentEpoch:     t.currentEpochData,
-		HistoricalEpochs: make([]*EpochSummary, 0, len(t.historicalEpochs)),
-		RealtimePoints:   make([]TVCHistoryPoint, len(t.realtimePoints)),
-		LastUpdate:       time.Now(),
-	}
-
-	// Copy realtime points
-	copy(response.RealtimePoints, t.realtimePoints)
-
-	// Add historical epochs (sorted by epoch number)
-	epochs := make([]int64, 0, len(t.historicalEpochs))
-	for epoch := range t.historicalEpochs {
-		epochs = append(epochs, epoch)
-	}
-	sort.Slice(epochs, func(i, j int) bool { return epochs[i] > epochs[j] }) // Latest first
-
-	for _, epoch := range epochs {
-		if req.Epoch == nil || *req.Epoch == epoch {
-			response.HistoricalEpochs = append(response.HistoricalEpochs, t.historicalEpochs[epoch])
+		response := &HistoryResponse{
+			CurrentEpoch:     t.currentEpochData,
+			HistoricalEpochs: make([]*EpochSummary, 0, len(t.historicalEpochs)),
+			RealtimePoints:   make([]TVCHistoryPoint, len(t.realtimePoints)),
+			LastUpdate:       time.Now(),
 		}
+
+		// Copy realtime points
+		copy(response.RealtimePoints, t.realtimePoints)
+
+		// NEW: Add recent batches
+		batchLimit := 50
+		if req.Limit != nil && *req.Limit < batchLimit {
+			batchLimit = *req.Limit
+		}
+
+		if len(t.cachedBatches) > 0 {
+			startIdx := len(t.cachedBatches) - batchLimit
+			if startIdx < 0 {
+				startIdx = 0
+			}
+			response.RecentBatches = make([]VoteBatchHistory, len(t.cachedBatches)-startIdx)
+			copy(response.RecentBatches, t.cachedBatches[startIdx:])
+		}
+
+		response.TotalBatches = len(t.cachedBatches)
+
+		// Add batch trends from current epoch
+		if t.currentEpochData != nil && len(t.currentEpochData.VoteBatches) > 0 {
+			trends := t.calculateBatchTrends(t.currentEpochData.VoteBatches)
+			response.BatchTrends = &trends
+		}
+
+		// Add historical epochs (sorted by epoch number)
+		epochs := make([]int64, 0, len(t.historicalEpochs))
+		for epoch := range t.historicalEpochs {
+			epochs = append(epochs, epoch)
+		}
+		sort.Slice(epochs, func(i, j int) bool { return epochs[i] > epochs[j] }) // Latest first
+
+		for _, epoch := range epochs {
+			if req.Epoch == nil || *req.Epoch == epoch {
+				response.HistoricalEpochs = append(response.HistoricalEpochs, t.historicalEpochs[epoch])
+			}
+		}
+
+		// Apply limit
+		if req.Limit != nil && len(response.RealtimePoints) > *req.Limit {
+			response.RealtimePoints = response.RealtimePoints[len(response.RealtimePoints)-*req.Limit:]
+		}
+
+		response.TotalPoints = len(response.RealtimePoints)
+		if response.CurrentEpoch != nil {
+			response.TotalPoints += len(response.CurrentEpoch.HistoryPoints)
+		}
+		for _, epoch := range response.HistoricalEpochs {
+			response.TotalPoints += len(epoch.HistoryPoints)
+		}
+
+		return response, nil
 	}
 
-	// Apply limit
-	if req.Limit != nil && len(response.RealtimePoints) > *req.Limit {
-		response.RealtimePoints = response.RealtimePoints[len(response.RealtimePoints)-*req.Limit:]
-	}
+	// GetBatchHistory returns vote batch history for API requests
+	func (t *TVCHistoryManager) GetBatchHistory(req BatchQueryRequest) ([]VoteBatchHistory, *BatchTrendAnalysis, error) {
+		t.mu.RLock()
+		defer t.mu.RUnlock()
 
-	response.TotalPoints = len(response.RealtimePoints)
-	if response.CurrentEpoch != nil {
-		response.TotalPoints += len(response.CurrentEpoch.HistoryPoints)
-	}
-	for _, epoch := range response.HistoricalEpochs {
-		response.TotalPoints += len(epoch.HistoryPoints)
-	}
+		var filteredBatches []VoteBatchHistory
 
-	return response, nil
-}
+		// Apply filters
+		for _, batch := range t.cachedBatches {
+			// Filter by epoch
+			if req.Epoch != nil && batch.Epoch != *req.Epoch {
+				continue
+			}
+
+			// Filter by slot range
+			if req.StartSlot != nil && batch.EndSlot < *req.StartSlot {
+				continue
+			}
+			if req.EndSlot != nil && batch.StartSlot > *req.EndSlot {
+				continue
+			}
+
+			// Filter by performance
+			if req.MinPerf != nil && batch.Performance < *req.MinPerf {
+				continue
+			}
+
+			// Filter by latency
+			if req.MaxLatency != nil && batch.AvgLatency > *req.MaxLatency {
+				continue
+			}
+
+			filteredBatches = append(filteredBatches, batch)
+		}
+
+		// Apply limit
+		if req.Limit != nil && len(filteredBatches) > *req.Limit {
+			// Keep the most recent batches
+			startIdx := len(filteredBatches) - *req.Limit
+			filteredBatches = filteredBatches[startIdx:]
+		}
+
+		// Calculate trends for filtered batches
+		var trends *BatchTrendAnalysis
+		if len(filteredBatches) > 0 {
+			trendAnalysis := t.calculateBatchTrends(filteredBatches)
+			trends = &trendAnalysis
+		}
+
+		return filteredBatches, trends, nil
+	}
 
 // saveToDisk saves TVC history data to disk
 func (t *TVCHistoryManager) saveToDisk() {
@@ -588,13 +955,17 @@ func (t *TVCHistoryManager) saveToDisk() {
 		CurrentEpoch     *EpochSummary              `json:"current_epoch"`
 		HistoricalEpochs map[int64]*EpochSummary    `json:"historical_epochs"`
 		RealtimePoints   []TVCHistoryPoint          `json:"realtime_points"`
+		CachedBatches    []VoteBatchHistory         `json:"cached_batches"`
 		LastStoredSlot   int64                      `json:"last_stored_slot"`
+		LastBatchSlot    int64                      `json:"last_batch_slot"`
 		SavedAt          time.Time                  `json:"saved_at"`
 	}{
 		CurrentEpoch:     t.currentEpochData,
 		HistoricalEpochs: t.historicalEpochs,
 		RealtimePoints:   t.realtimePoints,
+		CachedBatches:    t.cachedBatches,
 		LastStoredSlot:   t.lastStoredSlot,
+		LastBatchSlot:    t.lastBatchSlot,
 		SavedAt:          time.Now(),
 	}
 
@@ -635,7 +1006,9 @@ func (t *TVCHistoryManager) loadFromDisk() {
 		CurrentEpoch     *EpochSummary              `json:"current_epoch"`
 		HistoricalEpochs map[int64]*EpochSummary    `json:"historical_epochs"`
 		RealtimePoints   []TVCHistoryPoint          `json:"realtime_points"`
+		CachedBatches    []VoteBatchHistory         `json:"cached_batches"`
 		LastStoredSlot   int64                      `json:"last_stored_slot"`
+		LastBatchSlot    int64                      `json:"last_batch_slot"`
 		SavedAt          time.Time                  `json:"saved_at"`
 	}
 
@@ -655,10 +1028,14 @@ func (t *TVCHistoryManager) loadFromDisk() {
 	if saveData.RealtimePoints != nil {
 		t.realtimePoints = saveData.RealtimePoints
 	}
+	if saveData.CachedBatches != nil {
+		t.cachedBatches = saveData.CachedBatches
+	}
 	t.lastStoredSlot = saveData.LastStoredSlot
+	t.lastBatchSlot = saveData.LastBatchSlot
 
-	t.logger.Infof("Loaded TVC history from disk: %d historical epochs, %d realtime points",
-		len(t.historicalEpochs), len(t.realtimePoints))
+	t.logger.Infof("Loaded TVC history from disk: %d historical epochs, %d realtime points, %d cached batches",
+		len(t.historicalEpochs), len(t.realtimePoints), len(t.cachedBatches))
 }
 
 // Describe implements prometheus.Collector interface
@@ -666,6 +1043,8 @@ func (t *TVCHistoryManager) Describe(ch chan<- *prometheus.Desc) {
 	t.TVCHistoryPoints.Describe(ch)
 	t.EpochPerformanceGrade.Describe(ch)
 	t.HistoryStorageSize.Describe(ch)
+	t.BatchHistoryCount.Describe(ch)
+	t.BatchTrendMetrics.Describe(ch)
 }
 
 // Collect implements prometheus.Collector interface
@@ -673,4 +1052,6 @@ func (t *TVCHistoryManager) Collect(ch chan<- prometheus.Metric) {
 	t.TVCHistoryPoints.Collect(ch)
 	t.EpochPerformanceGrade.Collect(ch)
 	t.HistoryStorageSize.Collect(ch)
+	t.BatchHistoryCount.Collect(ch)
+	t.BatchTrendMetrics.Collect(ch)
 }
