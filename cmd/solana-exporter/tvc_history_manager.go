@@ -320,34 +320,47 @@ func (t *TVCHistoryManager) collectAndStoreBatches(ctx context.Context) {
 	var newBatches []VoteBatchHistory
 
 	for _, batch := range batches {
-		// Only store batches that we haven't seen before
-		if batch.EndSlot > t.lastBatchSlot {
-			gapFromPrevious := int64(0)
-			if len(t.cachedBatches) > 0 {
-				lastBatch := t.cachedBatches[len(t.cachedBatches)-1]
-				gapFromPrevious = batch.StartSlot - lastBatch.EndSlot
+		// Only store COMPLETED batches (20000 slots) that we haven't seen before
+		// Skip live/incomplete batches (they will be shown from current analysis)
+		const fixedBatchSize = 20000
+		if batch.TotalSlots == fixedBatchSize && batch.EndSlot < currentSlot-10 {
+			// Check if we already have this batch (by BatchID and StartSlot)
+			alreadyExists := false
+			for _, existing := range t.cachedBatches {
+				if existing.BatchID == batch.ID && existing.StartSlot == batch.StartSlot {
+					alreadyExists = true
+					break
+				}
 			}
 
-			batchHistory := VoteBatchHistory{
-				Timestamp:       now,
-				Slot:            currentSlot,
-				Epoch:           epochInfo.Epoch,
-				BatchID:         batch.ID,
-				StartSlot:       batch.StartSlot,
-				EndSlot:         batch.EndSlot,
-				SlotRange:       batch.SlotRange,
-				TotalSlots:      batch.TotalSlots,
-				VotedSlots:      batch.VotedSlots,
-				MissedSlots:     batch.MissedSlots,
-				MissedTVCs:      batch.MissedTVCs,
-				Performance:     batch.Performance,
-				AvgLatency:      batch.AvgLatency,
-				VoteCount:       len(batch.Votes),
-				IsComplete:      batch.EndSlot < currentSlot-10, // Complete if batch is behind current slot
-				GapFromPrevious: gapFromPrevious,
-			}
+			if !alreadyExists {
+				gapFromPrevious := int64(0)
+				if len(t.cachedBatches) > 0 {
+					lastBatch := t.cachedBatches[len(t.cachedBatches)-1]
+					gapFromPrevious = batch.StartSlot - lastBatch.EndSlot
+				}
 
-			newBatches = append(newBatches, batchHistory)
+				batchHistory := VoteBatchHistory{
+					Timestamp:       now,
+					Slot:            currentSlot,
+					Epoch:           epochInfo.Epoch,
+					BatchID:         batch.ID,
+					StartSlot:       batch.StartSlot,
+					EndSlot:         batch.EndSlot,
+					SlotRange:       batch.SlotRange,
+					TotalSlots:      batch.TotalSlots,
+					VotedSlots:      batch.VotedSlots,
+					MissedSlots:     batch.MissedSlots,
+					MissedTVCs:      batch.MissedTVCs,
+					Performance:     batch.Performance,
+					AvgLatency:      batch.AvgLatency,
+					VoteCount:       len(batch.Votes),
+					IsComplete:      true, // Only completed batches are stored
+					GapFromPrevious: gapFromPrevious,
+				}
+
+				newBatches = append(newBatches, batchHistory)
+			}
 		}
 	}
 
@@ -361,9 +374,9 @@ func (t *TVCHistoryManager) collectAndStoreBatches(ctx context.Context) {
 		t.cachedBatches = t.cachedBatches[:500]
 	}
 
-	// Update last batch slot
-	if len(batches) > 0 {
-		t.lastBatchSlot = batches[len(batches)-1].EndSlot
+	// Update last batch slot (only for completed batches)
+	if len(newBatches) > 0 {
+		t.lastBatchSlot = newBatches[len(newBatches)-1].EndSlot
 	}
 
 	// Add batches to current epoch

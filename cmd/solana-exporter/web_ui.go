@@ -228,24 +228,29 @@ func (w *WebUI) handleAPIVoteBatches(writer http.ResponseWriter, request *http.R
 		batchData = append(batchData, *currentBatchData)
 	}
 
-	// Add historical batches (excluding the one that matches current live batch)
+	// Add historical batches (only completed batches with 20000 slots)
+	// Exclude the one that matches current live batch by BatchID
 	for _, histBatch := range historicalBatches {
-		// Skip if this historical batch matches the current live batch
-		if currentBatchData != nil && histBatch.SlotRange == currentBatchData.SlotRange {
+		// Skip if this historical batch matches the current live batch (same BatchID)
+		if currentBatchData != nil && histBatch.BatchID == currentBatchData.BatchID {
 			continue
 		}
 		
-		batchData = append(batchData, VoteBatchData{
-			BatchID:     histBatch.BatchID,
-			SlotRange:   histBatch.SlotRange,
-			StartTime:   histBatch.Timestamp.Format("02.01.2006 15:04:05"),
-			MissedTVCs:  histBatch.MissedTVCs,
-			MissedSlots: histBatch.MissedSlots,
-			AvgLatency:  histBatch.AvgLatency,
-			Performance: histBatch.Performance,
-			TotalSlots:  histBatch.TotalSlots,
-			IsLive:      false, // Historical batch
-		})
+		// Only show completed batches (20000 slots)
+		const fixedBatchSize = 20000
+		if histBatch.TotalSlots == fixedBatchSize && histBatch.IsComplete {
+			batchData = append(batchData, VoteBatchData{
+				BatchID:     histBatch.BatchID,
+				SlotRange:   histBatch.SlotRange,
+				StartTime:   histBatch.Timestamp.Format("02.01.2006 15:04:05"),
+				MissedTVCs:  histBatch.MissedTVCs,
+				MissedSlots: histBatch.MissedSlots,
+				AvgLatency:  histBatch.AvgLatency,
+				Performance: histBatch.Performance,
+				TotalSlots:  histBatch.TotalSlots,
+				IsLive:      false, // Historical batch
+			})
+		}
 	}
 
 	writer.Header().Set("Content-Type", "application/json")
