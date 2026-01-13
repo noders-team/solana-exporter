@@ -165,8 +165,11 @@ func (v *VoteBatchAnalyzer) AnalyzeVoteBatches(
 	}
 
 	// Group votes into fixed-size batches (20000 slots each)
+	v.logger.Infof("Analyzing votes for validator %s: total votes=%d, first slot=%d, last slot=%d, current slot=%d",
+		nodekey, len(votes), votes[0].Slot, votes[len(votes)-1].Slot, currentSlot)
+	
 	batches := v.groupVotesIntoFixedBatches(votes, currentSlot)
-	v.logger.Debugf("Analyzed %d vote batches for validator %s", len(batches), nodekey)
+	v.logger.Infof("Analyzed %d vote batches for validator %s", len(batches), nodekey)
 
 	return batches, nil
 }
@@ -194,10 +197,12 @@ func (v *VoteBatchAnalyzer) groupVotesIntoFixedBatches(votes []Vote, currentSlot
 
 		// Collect all votes in this batch interval
 		var batchVotes []Vote
+		skippedBefore := 0
 		for voteIndex < len(votes) {
 			voteSlot := votes[voteIndex].Slot
 			if voteSlot < batchStartSlot {
 				// Skip votes before this batch
+				skippedBefore++
 				voteIndex++
 				continue
 			}
@@ -207,6 +212,12 @@ func (v *VoteBatchAnalyzer) groupVotesIntoFixedBatches(votes []Vote, currentSlot
 			}
 			batchVotes = append(batchVotes, votes[voteIndex])
 			voteIndex++
+		}
+		
+		// Log detailed info for current/live batch
+		if batchNum == currentBatchNum {
+			v.logger.Infof("LIVE BATCH %d: slots %d-%d (current=%d), votes collected=%d, skipped before=%d, voteIndex=%d/%d",
+				batchNum, batchStartSlot, batchEndSlot, currentSlot, len(batchVotes), skippedBefore, voteIndex, len(votes))
 		}
 
 		// Create batch (even if no votes, to show missed slots)
@@ -223,9 +234,29 @@ func (v *VoteBatchAnalyzer) groupVotesIntoFixedBatches(votes []Vote, currentSlot
 		// Finalize batch metrics
 		batch = v.finalizeFixedBatch(batch, currentSlot)
 
-		// Log batch info for debugging
-		v.logger.Debugf("Batch %d: slots %d-%d, votes=%d, votedSlots=%d, missedSlots=%d, totalSlots=%d",
-			batchNum, batchStartSlot, batchEndSlot, len(batchVotes), batch.VotedSlots, batch.MissedSlots, batch.TotalSlots)
+		// Log batch info for debugging (detailed for live batch)
+		if batchNum == currentBatchNum {
+			v.logger.Infof("BATCH %d FINAL: slots %d-%d, totalVotes=%d, uniqueVotedSlots=%d, missedSlots=%d, totalSlots=%d, performance=%.2f%%",
+				batchNum, batch.StartSlot, batch.EndSlot, len(batchVotes), batch.VotedSlots, batch.MissedSlots, batch.TotalSlots, batch.Performance)
+			// Log first and last few votes in batch
+			if len(batchVotes) > 0 {
+				firstFew := len(batchVotes)
+				if firstFew > 5 {
+					firstFew = 5
+				}
+				v.logger.Infof("  First %d votes: %v", firstFew, batchVotes[:firstFew])
+				if len(batchVotes) > 5 {
+					lastFew := len(batchVotes) - 5
+					if lastFew < 0 {
+						lastFew = 0
+					}
+					v.logger.Infof("  Last %d votes: %v", len(batchVotes)-lastFew, batchVotes[lastFew:])
+				}
+			}
+		} else {
+			v.logger.Debugf("Batch %d: slots %d-%d, votes=%d, votedSlots=%d, missedSlots=%d, totalSlots=%d",
+				batchNum, batchStartSlot, batchEndSlot, len(batchVotes), batch.VotedSlots, batch.MissedSlots, batch.TotalSlots)
+		}
 
 		batches = append(batches, batch)
 	}
