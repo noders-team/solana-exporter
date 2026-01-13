@@ -218,14 +218,14 @@ func (v *VoteBatchAnalyzer) groupVotesIntoFixedBatches(votes []Vote, currentSlot
 		}
 
 		// Calculate batch start time
-		if len(batchVotes) > 0 {
-			batch.StartTime = v.estimateSlotTime(batchStartSlot, currentSlot)
-		} else {
-			batch.StartTime = v.estimateSlotTime(batchStartSlot, currentSlot)
-		}
+		batch.StartTime = v.estimateSlotTime(batchStartSlot, currentSlot)
 
 		// Finalize batch metrics
 		batch = v.finalizeFixedBatch(batch, currentSlot)
+
+		// Log batch info for debugging
+		v.logger.Debugf("Batch %d: slots %d-%d, votes=%d, votedSlots=%d, missedSlots=%d, totalSlots=%d",
+			batchNum, batchStartSlot, batchEndSlot, len(batchVotes), batch.VotedSlots, batch.MissedSlots, batch.TotalSlots)
 
 		batches = append(batches, batch)
 	}
@@ -246,8 +246,10 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 	}
 
 	// Count voted slots (unique slots voted on)
+	// In Solana, each vote covers one slot, and validator gets 1 credit per voted slot
 	votedSlotMap := make(map[int64]bool)
 	for _, vote := range batch.Votes {
+		// Only count votes within batch boundaries
 		if vote.Slot >= batch.StartSlot && vote.Slot <= batch.EndSlot {
 			votedSlotMap[vote.Slot] = true
 		}
@@ -255,12 +257,17 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 	batch.VotedSlots = int64(len(votedSlotMap))
 
 	// Calculate missed slots
+	// Missed slots = total slots in batch - slots that were voted on
 	batch.MissedSlots = batch.TotalSlots - batch.VotedSlots
 	if batch.MissedSlots < 0 {
 		batch.MissedSlots = 0
 	}
 
-	// Calculate missed TVCs (1 TVC per missed slot)
+	// Calculate missed TVCs
+	// In Solana: 1 TVC (Transaction Vote Credit) = 1 credit per slot
+	// If validator votes for a slot, they get 1 credit
+	// If validator misses a slot, they lose 1 credit (missed TVC)
+	// So: Missed TVCs = Missed Slots
 	batch.MissedTVCs = batch.MissedSlots
 
 	// Calculate performance
