@@ -259,20 +259,38 @@ const (
 )
 
 // DetectBinaryType определяет тип бинарника по формату версии
-// Agave: major >= 1 или формат с 3 частями, где major > 0
-// Firedancer: major == 0 и формат с 4 частями (0.809.30106)
+// Agave: версии вида "3.1.4" (major >= 1, minor и patch обычно небольшие числа)
+// Firedancer: версии вида "0.809.30106" (major == 0, minor > 100 или patch > 1000)
 func DetectBinaryType(version string) BinaryType {
 	version = strings.TrimPrefix(version, "v")
 	parts := strings.Split(version, ".")
 	
-	// Firedancer имеет формат 0.809.30106 (4 части, major == 0)
-	if len(parts) == 4 {
-		if major, err := strconv.Atoi(parts[0]); err == nil && major == 0 {
+	if len(parts) < 3 {
+		// Недостаточно частей, считаем Agave по умолчанию
+		return BinaryTypeAgave
+	}
+	
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return BinaryTypeAgave
+	}
+	
+	// Firedancer имеет формат 0.809.30106, где major == 0 и minor/patch очень большие
+	if major == 0 {
+		minor, err := strconv.Atoi(parts[1])
+		if err == nil && minor > 100 {
+			return BinaryTypeFiredancer
+		}
+		
+		// Проверяем patch, если minor не подошел
+		patchStr := strings.Split(parts[2], "-")[0] // Убираем суффиксы типа "-beta"
+		patch, err := strconv.Atoi(patchStr)
+		if err == nil && patch > 1000 {
 			return BinaryTypeFiredancer
 		}
 	}
 	
-	// Agave имеет формат 3.1.4 (3 части, major >= 1)
+	// Agave имеет формат 3.1.4 (major >= 1 или major == 0 с небольшими minor/patch)
 	return BinaryTypeAgave
 }
 
