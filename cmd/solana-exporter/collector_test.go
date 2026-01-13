@@ -173,13 +173,13 @@ func (c *Simulator) PopulateSlot(slot int) {
 	c.Server.SetOpt(
 		rpc.EasyResultsOpt,
 		"getEpochInfo",
-		map[string]int{
-			"absoluteSlot":     slot,
-			"blockHeight":      c.BlockHeight,
-			"epoch":            c.Epoch,
-			"slotIndex":        slot % c.EpochSize,
-			"slotsInEpoch":     c.EpochSize,
-			"transactionCount": c.TransactionCount,
+		map[string]int64{
+			"absoluteSlot":     int64(slot),
+			"blockHeight":      int64(c.BlockHeight),
+			"epoch":            int64(c.Epoch),
+			"slotIndex":        int64(slot % c.EpochSize),
+			"slotsInEpoch":     int64(c.EpochSize),
+			"transactionCount": int64(c.TransactionCount),
 		},
 	)
 	c.Server.SetOpt(
@@ -224,7 +224,8 @@ func TestSolanaCollector(t *testing.T) {
 	simulator, client := NewSimulator(t, 35)
 	simulator.Server.SetOpt(rpc.EasyResultsOpt, "getGenesisHash", rpc.MainnetGenesisHash)
 
-	collector := NewSolanaCollector(client, nil, newTestConfig(simulator, false))
+	voteAccountCache := NewVoteAccountCache(client)
+	collector := NewSolanaCollector(client, nil, newTestConfig(simulator, false), voteAccountCache)
 	prometheus.NewPedanticRegistry().MustRegister(collector)
 
 	stake := float64(1_000_000) / rpc.LamportsInSol
@@ -310,7 +311,8 @@ func TestSolanaCollector(t *testing.T) {
 func TestSolanaCollector_collectHealth(t *testing.T) {
 	simulator, client := NewSimulator(t, 0)
 
-	collector := NewSolanaCollector(client, nil, newTestConfig(simulator, false))
+	voteAccountCache := NewVoteAccountCache(client)
+	collector := NewSolanaCollector(client, nil, newTestConfig(simulator, false), voteAccountCache)
 	prometheus.NewPedanticRegistry().MustRegister(collector)
 
 	t.Run("healthy", func(t *testing.T) {

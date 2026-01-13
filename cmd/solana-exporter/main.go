@@ -31,10 +31,12 @@ func main() {
 	if config.ReferenceRpcUrl != "" {
 		referenceRpcClient = rpc.NewRPCClient(config.ReferenceRpcUrl, config.HttpTimeout)
 	}
-	collector := NewSolanaCollector(rpcClient, referenceRpcClient, config)
+	// Create shared vote account cache to reduce RPC calls
+	voteAccountCache := NewVoteAccountCache(rpcClient)
+	collector := NewSolanaCollector(rpcClient, referenceRpcClient, config, voteAccountCache)
 	slotWatcher := NewSlotWatcher(rpcClient, config)
-	voteBatchAnalyzer := NewVoteBatchAnalyzer(rpcClient, config)
-	tvcHistoryManager := NewTVCHistoryManager(rpcClient, voteBatchAnalyzer, config)
+	voteBatchAnalyzer := NewVoteBatchAnalyzer(rpcClient, config, voteAccountCache)
+	tvcHistoryManager := NewTVCHistoryManager(rpcClient, voteBatchAnalyzer, config, voteAccountCache)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go slotWatcher.WatchSlots(ctx)

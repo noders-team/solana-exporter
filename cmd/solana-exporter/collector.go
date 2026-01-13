@@ -43,15 +43,18 @@ type SolanaCollector struct {
 
 	config *ExporterConfig
 
+	// Vote account cache to reduce RPC calls
+	voteAccountCache *VoteAccountCache
+
 	/// descriptors:
-	ValidatorActiveStake    *GaugeDesc
-	ClusterActiveStake      *GaugeDesc
-	ValidatorLastVote       *GaugeDesc
-	ClusterLastVote         *GaugeDesc
-	ValidatorRootSlot       *GaugeDesc
-	ClusterRootSlot         *GaugeDesc
-	ValidatorDelinquent     *GaugeDesc
-	ClusterValidatorCount   *GaugeDesc
+	ValidatorActiveStake     *GaugeDesc
+	ClusterActiveStake       *GaugeDesc
+	ValidatorLastVote        *GaugeDesc
+	ClusterLastVote          *GaugeDesc
+	ValidatorRootSlot        *GaugeDesc
+	ClusterRootSlot          *GaugeDesc
+	ValidatorDelinquent      *GaugeDesc
+	ClusterValidatorCount    *GaugeDesc
 	ValidatorCommission      *GaugeDesc
 	ValidatorEpochCredits    *GaugeDesc
 	ValidatorExpectedCredits *GaugeDesc
@@ -59,23 +62,24 @@ type SolanaCollector struct {
 	AccountBalances          *GaugeDesc
 
 	// Vote batch analyzer
-	voteBatchAnalyzer        *VoteBatchAnalyzer
-	NodeVersion              *GaugeDesc
-	NodeIdentity             *GaugeDesc
-	NodeIsHealthy            *GaugeDesc
-	NodeNumSlotsBehind       *GaugeDesc
-	NodeMinimumLedgerSlot    *GaugeDesc
-	NodeFirstAvailableBlock  *GaugeDesc
-	NodeIsActive             *GaugeDesc
-	NodeVersionOutdated      *GaugeDesc
+	voteBatchAnalyzer       *VoteBatchAnalyzer
+	NodeVersion             *GaugeDesc
+	NodeIdentity            *GaugeDesc
+	NodeIsHealthy           *GaugeDesc
+	NodeNumSlotsBehind      *GaugeDesc
+	NodeMinimumLedgerSlot   *GaugeDesc
+	NodeFirstAvailableBlock *GaugeDesc
+	NodeIsActive            *GaugeDesc
+	NodeVersionOutdated     *GaugeDesc
 }
 
-func NewSolanaCollector(rpcClient *rpc.Client, referenceRpcClient *rpc.Client, config *ExporterConfig) *SolanaCollector {
+func NewSolanaCollector(rpcClient *rpc.Client, referenceRpcClient *rpc.Client, config *ExporterConfig, voteAccountCache *VoteAccountCache) *SolanaCollector {
 	collector := &SolanaCollector{
 		rpcClient:          rpcClient,
 		referenceRpcClient: referenceRpcClient,
 		logger:             slog.Get(),
 		config:             config,
+		voteAccountCache:   voteAccountCache,
 		ValidatorActiveStake: NewGaugeDesc(
 			"solana_validator_active_stake",
 			fmt.Sprintf("Active stake (in SOL) per validator (represented by %s and %s)", VotekeyLabel, NodekeyLabel),
@@ -177,7 +181,7 @@ func NewSolanaCollector(rpcClient *rpc.Client, referenceRpcClient *rpc.Client, c
 			fmt.Sprintf("Whether the node version is outdated compared to reference RPC (1=outdated, 0=up-to-date), with %s and %s labels", CurrentVersionLabel, LatestVersionLabel),
 			CurrentVersionLabel, LatestVersionLabel,
 		),
-		voteBatchAnalyzer: NewVoteBatchAnalyzer(rpcClient, config),
+		voteBatchAnalyzer: NewVoteBatchAnalyzer(rpcClient, config, voteAccountCache),
 	}
 	return collector
 }
@@ -207,7 +211,9 @@ func (c *SolanaCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.NodeFirstAvailableBlock.Desc
 	ch <- c.NodeIsActive.Desc
 	ch <- c.ValidatorCommission.Desc
-	ch <- c.NodeVersionOutdated.Desc
+	if c.referenceRpcClient != nil {
+		ch <- c.NodeVersionOutdated.Desc
+	}
 }
 
 func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- prometheus.Metric) {
@@ -239,9 +245,19 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 
 	// Get current epoch info for credits calculation
 	epochInfo, err := c.rpcClient.GetEpochInfo(ctx, rpc.CommitmentFinalized)
+	var epochInfoErr error
 	if err != nil {
 		c.logger.Errorf("failed to get epoch info for credits calculation: %v", err)
+		epochInfoErr = err
 	}
+
+	// Helper function to check if validator should be monitored
+	shouldMonitorValidator := func(nodekey, votekey string) bool {
+		return c.config.ComprehensiveVoteAccountTracking ||
+			slices.Contains(c.config.Nodekeys, nodekey) ||
+			slices.Contains(c.config.Votekeys, votekey)
+	}
+
 	for _, account := range append(voteAccounts.Current, voteAccounts.Delinquent...) {
 		accounts := []string{account.VotePubkey, account.NodePubkey}
 		stake, lastVote, rootSlot, commission :=
@@ -250,7 +266,13 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 			float64(account.RootSlot),
 			float64(account.Commission)
 
-		if slices.Contains(c.config.Nodekeys, account.NodePubkey) || c.config.ComprehensiveVoteAccountTracking {
+		// Always accumulate cluster metrics from all validators
+		totalStake += stake
+		maxLastVote = max(maxLastVote, lastVote)
+		maxRootSlot = max(maxRootSlot, rootSlot)
+
+		// Only collect validator-specific metrics for monitored validators
+		if shouldMonitorValidator(account.NodePubkey, account.VotePubkey) {
 			ch <- c.ValidatorActiveStake.MustNewConstMetric(stake, accounts...)
 			ch <- c.ValidatorLastVote.MustNewConstMetric(lastVote, accounts...)
 			ch <- c.ValidatorRootSlot.MustNewConstMetric(rootSlot, accounts...)
@@ -259,25 +281,26 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 			// Collect vote credits metrics if epoch info is available
 			if epochInfo != nil {
 				c.collectVoteCreditsMetrics(ctx, ch, account, epochInfo, accounts...)
+			} else if epochInfoErr != nil {
+				// Emit invalid metrics if epoch info failed
+				ch <- c.ValidatorEpochCredits.NewInvalidMetric(epochInfoErr)
+				ch <- c.ValidatorExpectedCredits.NewInvalidMetric(epochInfoErr)
+				ch <- c.ValidatorCreditsMissed.NewInvalidMetric(epochInfoErr)
 			}
 
 			// Collect vote batch metrics for detailed TVC analysis
 			c.voteBatchAnalyzer.CollectVoteBatchMetrics(ctx, ch, account.NodePubkey, account.VotePubkey)
 		}
-
-		totalStake += stake
-		maxLastVote = max(maxLastVote, lastVote)
-		maxRootSlot = max(maxRootSlot, rootSlot)
 	}
 
 	{
 		for _, account := range voteAccounts.Current {
-			if slices.Contains(c.config.Nodekeys, account.NodePubkey) || c.config.ComprehensiveVoteAccountTracking {
+			if shouldMonitorValidator(account.NodePubkey, account.VotePubkey) {
 				ch <- c.ValidatorDelinquent.MustNewConstMetric(0, account.VotePubkey, account.NodePubkey)
 			}
 		}
 		for _, account := range voteAccounts.Delinquent {
-			if slices.Contains(c.config.Nodekeys, account.NodePubkey) || c.config.ComprehensiveVoteAccountTracking {
+			if shouldMonitorValidator(account.NodePubkey, account.VotePubkey) {
 				ch <- c.ValidatorDelinquent.MustNewConstMetric(1, account.VotePubkey, account.NodePubkey)
 			}
 		}
@@ -300,11 +323,14 @@ func (c *SolanaCollector) collectVoteCreditsMetrics(
 	epochInfo *rpc.EpochInfo,
 	labelValues ...string,
 ) {
-	// Get detailed vote account data to access epoch credits
-	var voteAccountData rpc.VoteAccountData
-	_, err := rpc.GetAccountInfo(ctx, c.rpcClient, rpc.CommitmentFinalized, account.VotePubkey, &voteAccountData)
+	// Get detailed vote account data from cache
+	voteAccountData, err := c.voteAccountCache.Get(ctx, account.VotePubkey)
 	if err != nil {
 		c.logger.Errorf("failed to get vote account info for %s: %v", account.VotePubkey, err)
+		// Emit invalid metrics for all three credits metrics
+		ch <- c.ValidatorEpochCredits.NewInvalidMetric(err)
+		ch <- c.ValidatorExpectedCredits.NewInvalidMetric(err)
+		ch <- c.ValidatorCreditsMissed.NewInvalidMetric(err)
 		return
 	}
 
@@ -328,7 +354,7 @@ func (c *SolanaCollector) collectVoteCreditsMetrics(
 
 	// Calculate expected credits based on slot progress in epoch
 	slotsInCurrentEpoch := epochInfo.SlotIndex + 1 // +1 because SlotIndex is 0-based
-	expectedCredits := slotsInCurrentEpoch // Ideally, 1 credit per slot
+	expectedCredits := slotsInCurrentEpoch         // Ideally, 1 credit per slot
 
 	// Calculate percentage of credits missed
 	var creditsMissedPct float64
@@ -491,7 +517,6 @@ func (c *SolanaCollector) collectHealth(ctx context.Context, ch chan<- prometheu
 	}
 
 	c.logger.Info("Health collected.")
-	return
 }
 
 func (c *SolanaCollector) Collect(ch chan<- prometheus.Metric) {

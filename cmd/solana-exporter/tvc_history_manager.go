@@ -112,6 +112,7 @@ type (
 	TVCHistoryManager struct {
 		rpcClient         *rpc.Client
 		voteBatchAnalyzer *VoteBatchAnalyzer
+		voteAccountCache  *VoteAccountCache
 		config            *ExporterConfig
 		logger            *zap.SugaredLogger
 
@@ -171,12 +172,13 @@ type (
 	}
 )
 
-func NewTVCHistoryManager(rpcClient *rpc.Client, voteBatchAnalyzer *VoteBatchAnalyzer, config *ExporterConfig) *TVCHistoryManager {
+func NewTVCHistoryManager(rpcClient *rpc.Client, voteBatchAnalyzer *VoteBatchAnalyzer, config *ExporterConfig, voteAccountCache *VoteAccountCache) *TVCHistoryManager {
 	logger := slog.Get()
 
 	manager := &TVCHistoryManager{
 		rpcClient:         rpcClient,
 		voteBatchAnalyzer: voteBatchAnalyzer,
+		voteAccountCache:  voteAccountCache,
 		config:            config,
 		logger:            logger,
 		historicalEpochs:  make(map[int64]*EpochSummary),
@@ -296,16 +298,15 @@ func (t *TVCHistoryManager) collectAndStoreBatches(ctx context.Context) {
 		return
 	}
 
-	// Get vote account data
-	var voteAccountData rpc.VoteAccountData
-	_, err = rpc.GetAccountInfo(ctx, t.rpcClient, rpc.CommitmentFinalized, votekey, &voteAccountData)
+	// Get vote account data from cache
+	voteAccountData, err := t.voteAccountCache.Get(ctx, votekey)
 	if err != nil {
 		t.logger.Errorf("Failed to get vote account data for batch collection: %v", err)
 		return
 	}
 
 	// Analyze vote batches
-	batches, err := t.voteBatchAnalyzer.AnalyzeVoteBatches(ctx, &voteAccountData, nodekey, votekey)
+	batches, err := t.voteBatchAnalyzer.AnalyzeVoteBatches(ctx, voteAccountData, nodekey, votekey)
 	if err != nil {
 		t.logger.Errorf("Failed to analyze vote batches: %v", err)
 		return
@@ -424,16 +425,15 @@ func (t *TVCHistoryManager) collectCurrentData(ctx context.Context) {
 		return
 	}
 
-	// Get detailed vote account data for credits
-	var voteAccountData rpc.VoteAccountData
-	_, err = rpc.GetAccountInfo(ctx, t.rpcClient, rpc.CommitmentFinalized, votekey, &voteAccountData)
+	// Get detailed vote account data from cache
+	voteAccountData, err := t.voteAccountCache.Get(ctx, votekey)
 	if err != nil {
 		t.logger.Errorf("Failed to get vote account info: %v", err)
 		return
 	}
 
 	// Calculate TVC data
-	point := t.calculateTVCPoint(epochInfo, currentSlot, validatorAccount, &voteAccountData)
+	point := t.calculateTVCPoint(epochInfo, currentSlot, validatorAccount, voteAccountData)
 
 	t.mu.Lock()
 	defer t.mu.Unlock()

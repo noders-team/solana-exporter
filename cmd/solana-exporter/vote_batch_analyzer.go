@@ -45,9 +45,10 @@ type (
 
 	// VoteBatchAnalyzer analyzes vote patterns and detects gaps
 	VoteBatchAnalyzer struct {
-		rpcClient *rpc.Client
-		logger    *zap.SugaredLogger
-		config    *ExporterConfig
+		rpcClient        *rpc.Client
+		logger           *zap.SugaredLogger
+		config           *ExporterConfig
+		voteAccountCache *VoteAccountCache
 
 		// Metrics for vote batch analysis
 		VoteBatchMissedTVCs     *prometheus.GaugeVec
@@ -74,13 +75,14 @@ type (
 	}
 )
 
-func NewVoteBatchAnalyzer(rpcClient *rpc.Client, config *ExporterConfig) *VoteBatchAnalyzer {
+func NewVoteBatchAnalyzer(rpcClient *rpc.Client, config *ExporterConfig, voteAccountCache *VoteAccountCache) *VoteBatchAnalyzer {
 	logger := slog.Get()
 
 	return &VoteBatchAnalyzer{
-		rpcClient: rpcClient,
-		logger:    logger,
-		config:    config,
+		rpcClient:        rpcClient,
+		logger:           logger,
+		config:           config,
+		voteAccountCache: voteAccountCache,
 
 		VoteBatchMissedTVCs: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -282,16 +284,15 @@ func (v *VoteBatchAnalyzer) CollectVoteBatchMetrics(
 	ch chan<- prometheus.Metric,
 	nodekey, votekey string,
 ) {
-	// Get vote account data
-	var voteAccountData rpc.VoteAccountData
-	_, err := rpc.GetAccountInfo(ctx, v.rpcClient, rpc.CommitmentFinalized, votekey, &voteAccountData)
+	// Get vote account data from cache
+	voteAccountData, err := v.voteAccountCache.Get(ctx, votekey)
 	if err != nil {
 		v.logger.Errorf("Failed to get vote account info for %s: %v", votekey, err)
 		return
 	}
 
 	// Analyze vote batches
-	batches, err := v.AnalyzeVoteBatches(ctx, &voteAccountData, nodekey, votekey)
+	batches, err := v.AnalyzeVoteBatches(ctx, voteAccountData, nodekey, votekey)
 	if err != nil {
 		v.logger.Errorf("Failed to analyze vote batches for %s: %v", nodekey, err)
 		return

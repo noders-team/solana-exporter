@@ -280,6 +280,79 @@ func (s *MockServer) getResult(method string, params ...any) (any, *Error) {
 		return voteAccounts, nil
 	}
 
+	if method == "getAccountInfo" && s.validatorInfos != nil {
+		address := params[0].(string)
+		// Find validator by votekey or nodekey
+		var validatorInfo *MockValidatorInfo
+		var foundNodekey string
+		for nodekey, info := range s.validatorInfos {
+			if info.Votekey == address || nodekey == address {
+				validatorInfo = &info
+				foundNodekey = nodekey
+				break
+			}
+		}
+		if validatorInfo == nil {
+			return map[string]any{"value": nil}, nil
+		}
+
+		// Only return vote account data if address is a votekey
+		if validatorInfo.Votekey != address {
+			return map[string]any{"value": nil}, nil
+		}
+
+		// Create vote account data with epoch credits and votes
+		// For testing, we'll create some sample epoch credits and votes
+		epochCredits := []map[string]any{
+			{
+				"credits":         "100",
+				"epoch":           int64(0),
+				"previousCredits": "0",
+			},
+		}
+		votes := []map[string]any{
+			{
+				"confirmationCount": int64(32),
+				"slot":              int64(validatorInfo.LastVote),
+			},
+		}
+
+		voteAccountData := map[string]any{
+			"authorizedVoters":     []map[string]any{},
+			"authorizedWithdrawer": validatorInfo.Votekey,
+			"commission":           validatorInfo.Commission,
+			"epochCredits":         epochCredits,
+			"lastTimestamp": map[string]int64{
+				"slot":      int64(validatorInfo.LastVote),
+				"timestamp": time.Now().Unix(),
+			},
+			"nodePubkey": foundNodekey,
+			"priorVoters": []string{},
+			"rootSlot":    int64(validatorInfo.RootSlot),
+			"votes":       votes,
+		}
+
+		result := map[string]any{
+			"context": map[string]int{"slot": 1},
+			"value": map[string]any{
+				"data": map[string]any{
+					"parsed": map[string]any{
+						"info": voteAccountData,
+						"type": "vote",
+					},
+					"program": "vote",
+					"space":   3760,
+				},
+				"executable": false,
+				"lamports":  int64(validatorInfo.Stake),
+				"owner":     "Vote111111111111111111111111111111111111111",
+				"rentEpoch": uint64(0),
+				"space":     3760,
+			},
+		}
+		return result, nil
+	}
+
 	// default is use easy results:
 	result, ok := s.easyResults[method]
 	if !ok {
