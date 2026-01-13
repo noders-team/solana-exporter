@@ -24,6 +24,7 @@ const (
 	MaxVoteBatchGap    = 50  // Maximum slots between votes in same batch
 	MinBatchSize       = 100 // Minimum slots to consider as a batch
 	MaxLatencySeconds  = 30  // Maximum expected voting latency
+	FixedBatchSize     = 20000 // Fixed batch size in slots (each batch = 20000 slots)
 )
 
 type (
@@ -163,13 +164,122 @@ func (v *VoteBatchAnalyzer) AnalyzeVoteBatches(
 		currentSlot = votes[len(votes)-1].Slot + 10 // Fallback estimate
 	}
 
-	batches := v.groupVotesIntoBatches(votes, currentSlot)
+	// Group votes into fixed-size batches (20000 slots each)
+	batches := v.groupVotesIntoFixedBatches(votes, currentSlot)
 	v.logger.Debugf("Analyzed %d vote batches for validator %s", len(batches), nodekey)
 
 	return batches, nil
 }
 
-// groupVotesIntoBatches groups consecutive votes into logical batches
+// groupVotesIntoFixedBatches groups votes into fixed-size batches of 20000 slots each
+func (v *VoteBatchAnalyzer) groupVotesIntoFixedBatches(votes []Vote, currentSlot int64) []VoteBatch {
+	if len(votes) == 0 {
+		return nil
+	}
+
+	// Calculate batch numbers (1-based)
+	// Batch 1: slots 0-19999, Batch 2: 20000-39999, etc.
+	firstSlot := votes[0].Slot
+	firstBatchNum := int(firstSlot / FixedBatchSize) + 1
+	currentBatchNum := int(currentSlot / FixedBatchSize) + 1
+
+	var batches []VoteBatch
+	voteIndex := 0
+
+	// Process each fixed batch interval from first to current
+	for batchNum := firstBatchNum; batchNum <= currentBatchNum; batchNum++ {
+		// Calculate batch boundaries (0-based slots)
+		batchStartSlot := int64(batchNum-1) * FixedBatchSize
+		batchEndSlot := int64(batchNum) * FixedBatchSize - 1
+
+		// Collect all votes in this batch interval
+		var batchVotes []Vote
+		for voteIndex < len(votes) {
+			voteSlot := votes[voteIndex].Slot
+			if voteSlot < batchStartSlot {
+				// Skip votes before this batch
+				voteIndex++
+				continue
+			}
+			if voteSlot > batchEndSlot {
+				// This vote belongs to next batch
+				break
+			}
+			batchVotes = append(batchVotes, votes[voteIndex])
+			voteIndex++
+		}
+
+		// Create batch (even if no votes, to show missed slots)
+		batch := VoteBatch{
+			ID:        batchNum,
+			StartSlot: batchStartSlot,
+			EndSlot:   batchEndSlot,
+			Votes:     batchVotes,
+		}
+
+		// Calculate batch start time
+		if len(batchVotes) > 0 {
+			batch.StartTime = v.estimateSlotTime(batchStartSlot, currentSlot)
+		} else {
+			batch.StartTime = v.estimateSlotTime(batchStartSlot, currentSlot)
+		}
+
+		// Finalize batch metrics
+		batch = v.finalizeFixedBatch(batch, currentSlot)
+
+		batches = append(batches, batch)
+	}
+
+	return batches
+}
+
+// finalizeFixedBatch calculates metrics for a fixed-size batch
+func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int64) VoteBatch {
+	// For current/live batch (not yet completed), adjust end slot to current slot
+	isLiveBatch := batch.EndSlot >= currentSlot
+	if isLiveBatch {
+		batch.EndSlot = currentSlot
+		batch.TotalSlots = currentSlot - batch.StartSlot + 1
+	} else {
+		// For completed batches, use full 20000 slots
+		batch.TotalSlots = FixedBatchSize
+	}
+
+	// Count voted slots (unique slots voted on)
+	votedSlotMap := make(map[int64]bool)
+	for _, vote := range batch.Votes {
+		if vote.Slot >= batch.StartSlot && vote.Slot <= batch.EndSlot {
+			votedSlotMap[vote.Slot] = true
+		}
+	}
+	batch.VotedSlots = int64(len(votedSlotMap))
+
+	// Calculate missed slots
+	batch.MissedSlots = batch.TotalSlots - batch.VotedSlots
+	if batch.MissedSlots < 0 {
+		batch.MissedSlots = 0
+	}
+
+	// Calculate missed TVCs (1 TVC per missed slot)
+	batch.MissedTVCs = batch.MissedSlots
+
+	// Calculate performance
+	if batch.TotalSlots > 0 {
+		batch.Performance = float64(batch.VotedSlots) / float64(batch.TotalSlots) * 100.0
+	} else {
+		batch.Performance = 0.0
+	}
+
+	// Calculate average latency
+	batch.AvgLatency = v.estimateAverageLatency(batch.Votes, currentSlot)
+
+	// Format slot range
+	batch.SlotRange = fmt.Sprintf("%d-%d", batch.StartSlot, batch.EndSlot)
+
+	return batch
+}
+
+// groupVotesIntoBatches groups consecutive votes into logical batches (legacy method, kept for compatibility)
 func (v *VoteBatchAnalyzer) groupVotesIntoBatches(votes []Vote, currentSlot int64) []VoteBatch {
 	if len(votes) == 0 {
 		return nil
