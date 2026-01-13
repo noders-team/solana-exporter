@@ -13,35 +13,35 @@ import (
 )
 
 const (
-	BatchLabel         = "batch"
-	SlotRangeLabel     = "slot_range"
-	LatencyLabel       = "avg_latency"
-	MissedTVCsLabel    = "missed_tvcs"
-	MissedSlotsLabel   = "missed_slots"
-	StartTimeLabel     = "start_time"
+	BatchLabel       = "batch"
+	SlotRangeLabel   = "slot_range"
+	LatencyLabel     = "avg_latency"
+	MissedTVCsLabel  = "missed_tvcs"
+	MissedSlotsLabel = "missed_slots"
+	StartTimeLabel   = "start_time"
 
 	// Vote batch analysis parameters
-	MaxVoteBatchGap    = 50  // Maximum slots between votes in same batch
-	MinBatchSize       = 100 // Minimum slots to consider as a batch
-	MaxLatencySeconds  = 30  // Maximum expected voting latency
-	FixedBatchSize     = 20000 // Fixed batch size in slots (each batch = 20000 slots)
+	MaxVoteBatchGap   = 50    // Maximum slots between votes in same batch
+	MinBatchSize      = 100   // Minimum slots to consider as a batch
+	MaxLatencySeconds = 30    // Maximum expected voting latency
+	FixedBatchSize    = 20000 // Fixed batch size in slots (each batch = 20000 slots)
 )
 
 type (
 	// VoteBatch represents a group of consecutive votes
 	VoteBatch struct {
-		ID             int       `json:"batch_id"`
-		StartTime      time.Time `json:"start_time"`
-		StartSlot      int64     `json:"start_slot"`
-		EndSlot        int64     `json:"end_slot"`
-		SlotRange      string    `json:"slot_range"`
-		AvgLatency     float64   `json:"avg_latency"`
-		MissedTVCs     int64     `json:"missed_tvcs"`
-		MissedSlots    int64     `json:"missed_slots"`
-		TotalSlots     int64     `json:"total_slots"`
-		VotedSlots     int64     `json:"voted_slots"`
-		Votes          []Vote `json:"votes"`
-		Performance    float64   `json:"performance_pct"`
+		ID          int       `json:"batch_id"`
+		StartTime   time.Time `json:"start_time"`
+		StartSlot   int64     `json:"start_slot"`
+		EndSlot     int64     `json:"end_slot"`
+		SlotRange   string    `json:"slot_range"`
+		AvgLatency  float64   `json:"avg_latency"`
+		MissedTVCs  int64     `json:"missed_tvcs"`
+		MissedSlots int64     `json:"missed_slots"`
+		TotalSlots  int64     `json:"total_slots"`
+		VotedSlots  int64     `json:"voted_slots"`
+		Votes       []Vote    `json:"votes"`
+		Performance float64   `json:"performance_pct"`
 	}
 
 	// VoteBatchAnalyzer analyzes vote patterns and detects gaps
@@ -52,21 +52,21 @@ type (
 		voteAccountCache *VoteAccountCache
 
 		// Metrics for vote batch analysis
-		VoteBatchMissedTVCs     *prometheus.GaugeVec
-		VoteBatchMissedSlots    *prometheus.GaugeVec
-		VoteBatchAvgLatency     *prometheus.GaugeVec
-		VoteBatchPerformance    *prometheus.GaugeVec
-		VoteBatchSlotRange      *prometheus.GaugeVec
-		VoteBatchCount          *prometheus.GaugeVec
+		VoteBatchMissedTVCs  *prometheus.GaugeVec
+		VoteBatchMissedSlots *prometheus.GaugeVec
+		VoteBatchAvgLatency  *prometheus.GaugeVec
+		VoteBatchPerformance *prometheus.GaugeVec
+		VoteBatchSlotRange   *prometheus.GaugeVec
+		VoteBatchCount       *prometheus.GaugeVec
 	}
 
 	// VoteGap represents a gap in voting pattern
 	VoteGap struct {
-		StartSlot   int64     `json:"start_slot"`
-		EndSlot     int64     `json:"end_slot"`
-		Duration    int64     `json:"duration_slots"`
-		Timestamp   time.Time `json:"timestamp"`
-		MissedTVCs  int64     `json:"missed_tvcs"`
+		StartSlot  int64     `json:"start_slot"`
+		EndSlot    int64     `json:"end_slot"`
+		Duration   int64     `json:"duration_slots"`
+		Timestamp  time.Time `json:"timestamp"`
+		MissedTVCs int64     `json:"missed_tvcs"`
 	}
 
 	// Vote represents a validator vote (local copy from rpc package)
@@ -167,7 +167,7 @@ func (v *VoteBatchAnalyzer) AnalyzeVoteBatches(
 	// Group votes into fixed-size batches (20000 slots each)
 	v.logger.Infof("Analyzing votes for validator %s: total votes=%d, first slot=%d, last slot=%d, current slot=%d",
 		nodekey, len(votes), votes[0].Slot, votes[len(votes)-1].Slot, currentSlot)
-	
+
 	batches := v.groupVotesIntoFixedBatches(votes, currentSlot)
 	v.logger.Infof("Analyzed %d vote batches for validator %s", len(batches), nodekey)
 
@@ -183,8 +183,8 @@ func (v *VoteBatchAnalyzer) groupVotesIntoFixedBatches(votes []Vote, currentSlot
 	// Calculate batch numbers (1-based)
 	// Batch 1: slots 0-19999, Batch 2: 20000-39999, etc.
 	firstSlot := votes[0].Slot
-	firstBatchNum := int(firstSlot / FixedBatchSize) + 1
-	currentBatchNum := int(currentSlot / FixedBatchSize) + 1
+	firstBatchNum := int(firstSlot/FixedBatchSize) + 1
+	currentBatchNum := int(currentSlot/FixedBatchSize) + 1
 
 	var batches []VoteBatch
 	voteIndex := 0
@@ -193,7 +193,7 @@ func (v *VoteBatchAnalyzer) groupVotesIntoFixedBatches(votes []Vote, currentSlot
 	for batchNum := firstBatchNum; batchNum <= currentBatchNum; batchNum++ {
 		// Calculate batch boundaries (0-based slots)
 		batchStartSlot := int64(batchNum-1) * FixedBatchSize
-		batchEndSlot := int64(batchNum) * FixedBatchSize - 1
+		batchEndSlot := int64(batchNum)*FixedBatchSize - 1
 
 		// Collect all votes in this batch interval
 		var batchVotes []Vote
@@ -213,7 +213,7 @@ func (v *VoteBatchAnalyzer) groupVotesIntoFixedBatches(votes []Vote, currentSlot
 			batchVotes = append(batchVotes, votes[voteIndex])
 			voteIndex++
 		}
-		
+
 		// Log detailed info for current/live batch
 		if batchNum == currentBatchNum {
 			v.logger.Infof("LIVE BATCH %d: slots %d-%d (current=%d), votes collected=%d, skipped before=%d, voteIndex=%d/%d",
@@ -236,8 +236,18 @@ func (v *VoteBatchAnalyzer) groupVotesIntoFixedBatches(votes []Vote, currentSlot
 
 		// Log batch info for debugging (detailed for live batch)
 		if batchNum == currentBatchNum {
-			v.logger.Infof("BATCH %d FINAL: slots %d-%d, totalVotes=%d, uniqueVotedSlots=%d, missedSlots=%d, totalSlots=%d, performance=%.2f%%",
-				batchNum, batch.StartSlot, batch.EndSlot, len(batchVotes), batch.VotedSlots, batch.MissedSlots, batch.TotalSlots, batch.Performance)
+			activeRangeInfo := ""
+			if len(batchVotes) > 0 {
+				activeStart := batchVotes[0].Slot
+				activeEnd := batchVotes[len(batchVotes)-1].Slot
+				isLive := batch.EndSlot >= currentSlot
+				if isLive {
+					activeEnd = currentSlot
+				}
+				activeRangeInfo = fmt.Sprintf(", activeRange=%d-%d", activeStart, activeEnd)
+			}
+			v.logger.Infof("BATCH %d FINAL: batchSlots=%d-%d%s, totalVotes=%d, uniqueVotedSlots=%d, missedSlots=%d, activeRangeSlots=%d, performance=%.2f%%",
+				batchNum, batch.StartSlot, batch.EndSlot, activeRangeInfo, len(batchVotes), batch.VotedSlots, batch.MissedSlots, batch.TotalSlots, batch.Performance)
 			// Log first and last few votes in batch
 			if len(batchVotes) > 0 {
 				firstFew := len(batchVotes)
@@ -287,19 +297,48 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 	}
 	batch.VotedSlots = int64(len(votedSlotMap))
 
-	// Calculate missed slots
-	// Missed slots = total slots in batch - slots that were voted on
-	batch.MissedSlots = batch.TotalSlots - batch.VotedSlots
-	if batch.MissedSlots < 0 {
-		batch.MissedSlots = 0
-	}
+	// Calculate missed slots and TVCs
+	// IMPORTANT: In Solana, validators don't vote for every slot - they only vote for blocks they confirm
+	// The issue: we can't know which slots had blocks that needed voting
+	// Solution: Calculate missed slots only in the "active voting window" - from first vote to last vote
+	// This gives a more realistic performance metric
 
-	// Calculate missed TVCs
-	// In Solana: 1 TVC (Transaction Vote Credit) = 1 credit per slot
-	// If validator votes for a slot, they get 1 credit
-	// If validator misses a slot, they lose 1 credit (missed TVC)
-	// So: Missed TVCs = Missed Slots
-	batch.MissedTVCs = batch.MissedSlots
+	var activeRangeStart, activeRangeEnd int64
+	if len(batch.Votes) > 0 {
+		// Find first and last vote slots in batch
+		activeRangeStart = batch.Votes[0].Slot
+		activeRangeEnd = batch.Votes[len(batch.Votes)-1].Slot
+
+		// For live batch, extend to current slot to show real-time progress
+		if isLiveBatch {
+			activeRangeEnd = currentSlot
+		}
+
+		// Active range = slots from first vote to last vote (or current slot for live)
+		activeRangeSlots := activeRangeEnd - activeRangeStart + 1
+		if activeRangeSlots < 0 {
+			activeRangeSlots = 0
+		}
+
+		// Missed slots = active range slots - voted slots
+		// This shows gaps in voting within the active window
+		batch.MissedSlots = activeRangeSlots - batch.VotedSlots
+		if batch.MissedSlots < 0 {
+			batch.MissedSlots = 0
+		}
+
+		// Missed TVCs = missed slots in active range
+		batch.MissedTVCs = batch.MissedSlots
+
+		// For performance calculation, use active range instead of full batch
+		// This gives more meaningful percentage (e.g., 31 votes out of 37 slots = 83.8%)
+		batch.TotalSlots = activeRangeSlots
+	} else {
+		// No votes in batch - can't calculate meaningful metrics
+		batch.MissedSlots = 0
+		batch.MissedTVCs = 0
+		// Keep original TotalSlots for display
+	}
 
 	// Calculate performance
 	if batch.TotalSlots > 0 {
