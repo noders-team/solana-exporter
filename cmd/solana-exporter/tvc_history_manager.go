@@ -893,6 +893,32 @@ func (t *TVCHistoryManager) gradeToFloat(grade string) float64 {
 		return response, nil
 	}
 
+	// GetRecentBatches returns the most recent N batches from history
+	func (t *TVCHistoryManager) GetRecentBatches(limit int) []VoteBatchHistory {
+		t.mu.RLock()
+		defer t.mu.RUnlock()
+
+		if len(t.cachedBatches) == 0 {
+			return []VoteBatchHistory{}
+		}
+
+		// Return the most recent batches (they are stored in chronological order)
+		startIdx := len(t.cachedBatches) - limit
+		if startIdx < 0 {
+			startIdx = 0
+		}
+
+		result := make([]VoteBatchHistory, len(t.cachedBatches)-startIdx)
+		copy(result, t.cachedBatches[startIdx:])
+		
+		// Reverse to show newest first
+		for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+			result[i], result[j] = result[j], result[i]
+		}
+
+		return result
+	}
+
 	// GetBatchHistory returns vote batch history for API requests
 	func (t *TVCHistoryManager) GetBatchHistory(req BatchQueryRequest) ([]VoteBatchHistory, *BatchTrendAnalysis, error) {
 		t.mu.RLock()

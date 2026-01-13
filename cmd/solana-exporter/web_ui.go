@@ -69,6 +69,7 @@ type VoteBatchData struct {
 	AvgLatency     float64 `json:"avg_latency"`
 	Performance    float64 `json:"performance"`
 	TotalSlots     int64   `json:"total_slots"`
+	IsLive         bool    `json:"is_live"` // True for current batch being tracked in real-time
 }
 
 type NetworkActivityData struct {
@@ -183,34 +184,67 @@ func (w *WebUI) handleAPIVoteBatches(writer http.ResponseWriter, request *http.R
 	nodekey := w.config.Nodekeys[0]
 	votekey := w.config.Votekeys[0]
 
-	// Get vote account data
-	var voteAccountData rpc.VoteAccountData
-	_, err := rpc.GetAccountInfo(ctx, w.rpcClient, rpc.CommitmentFinalized, votekey, &voteAccountData)
+	// Get current live batch (real-time)
+	var currentBatchData *VoteBatchData
+	// Use vote account cache from collector to reduce RPC calls
+	voteAccountData, err := w.collector.voteAccountCache.Get(ctx, votekey)
 	if err != nil {
 		w.logger.Errorf("Failed to get vote account info: %v", err)
 		http.Error(writer, "Failed to get vote data", http.StatusInternalServerError)
 		return
 	}
 
-	batches, err := w.voteBatchAnalyzer.AnalyzeVoteBatches(ctx, &voteAccountData, nodekey, votekey)
+	batches, err := w.voteBatchAnalyzer.AnalyzeVoteBatches(ctx, voteAccountData, nodekey, votekey)
 	if err != nil {
 		w.logger.Errorf("Failed to analyze vote batches: %v", err)
 		http.Error(writer, "Failed to analyze vote batches", http.StatusInternalServerError)
 		return
 	}
 
-	// Convert to API format
+	// Get the most recent batch as live batch
+	if len(batches) > 0 {
+		latestBatch := batches[len(batches)-1]
+		currentBatchData = &VoteBatchData{
+			BatchID:     latestBatch.ID,
+			SlotRange:   latestBatch.SlotRange,
+			StartTime:   latestBatch.StartTime.Format("02.01.2006 15:04:05"),
+			MissedTVCs:  latestBatch.MissedTVCs,
+			MissedSlots: latestBatch.MissedSlots,
+			AvgLatency:  latestBatch.AvgLatency,
+			Performance: latestBatch.Performance,
+			TotalSlots:  latestBatch.TotalSlots,
+			IsLive:      true, // Mark as live batch
+		}
+	}
+
+	// Get historical batches from TVCHistoryManager
+	historicalBatches := w.tvcHistoryManager.GetRecentBatches(50) // Get last 50 batches
+
+	// Combine: live batch first, then historical batches
 	var batchData []VoteBatchData
-	for _, batch := range batches {
+	
+	// Add live batch as first row if available
+	if currentBatchData != nil {
+		batchData = append(batchData, *currentBatchData)
+	}
+
+	// Add historical batches (excluding the one that matches current live batch)
+	for _, histBatch := range historicalBatches {
+		// Skip if this historical batch matches the current live batch
+		if currentBatchData != nil && histBatch.SlotRange == currentBatchData.SlotRange {
+			continue
+		}
+		
 		batchData = append(batchData, VoteBatchData{
-			BatchID:     batch.ID,
-			SlotRange:   batch.SlotRange,
-			StartTime:   batch.StartTime.Format("02.01.2006 15:04:05"),
-			MissedTVCs:  batch.MissedTVCs,
-			MissedSlots: batch.MissedSlots,
-			AvgLatency:  batch.AvgLatency,
-			Performance: batch.Performance,
-			TotalSlots:  batch.TotalSlots,
+			BatchID:     histBatch.BatchID,
+			SlotRange:   histBatch.SlotRange,
+			StartTime:   histBatch.Timestamp.Format("02.01.2006 15:04:05"),
+			MissedTVCs:  histBatch.MissedTVCs,
+			MissedSlots: histBatch.MissedSlots,
+			AvgLatency:  histBatch.AvgLatency,
+			Performance: histBatch.Performance,
+			TotalSlots:  histBatch.TotalSlots,
+			IsLive:      false, // Historical batch
 		})
 	}
 
@@ -870,6 +904,19 @@ body {
     color: var(--text-secondary);
 }
 
+.live-batch-row {
+    background-color: rgba(88, 166, 255, 0.1);
+    border-left: 3px solid var(--info-color);
+}
+
+.live-indicator {
+    color: var(--info-color);
+    font-size: 0.75rem;
+    font-weight: bold;
+    animation: pulse 2s infinite;
+    margin-left: 0.5rem;
+}
+
 .loading-cell {
     text-align: center;
     padding: 2rem;
@@ -1068,11 +1115,17 @@ class SolanaDashboard {
     }
 
     startAutoRefresh() {
+        // Refresh dashboard data every 15 seconds
         setInterval(() => {
             if (!this.isLoading) {
                 this.loadDashboardData();
             }
         }, this.updateInterval);
+        
+        // Refresh vote batches more frequently (every 5 seconds) for live updates
+        setInterval(() => {
+            this.loadVoteBatches();
+        }, 5000);
     }
 
     async loadInitialData() {
@@ -1157,10 +1210,14 @@ class SolanaDashboard {
             return;
         }
 
-        const rows = batches.slice(0, 10).map(batch => {
+        const rows = batches.slice(0, 50).map((batch, index) => {
             const performanceClass = this.getPerformanceClass(batch.performance);
-            return '<tr>' +
-                '<td>' + batch.batch_id + '</td>' +
+            const isLive = batch.is_live || false;
+            const liveIndicator = isLive ? ' <span class="live-indicator">● LIVE</span>' : '';
+            const rowClass = isLive ? 'live-batch-row' : '';
+            
+            return '<tr class="' + rowClass + '">' +
+                '<td>' + batch.batch_id + liveIndicator + '</td>' +
                 '<td>' + batch.start_time + '</td>' +
                 '<td><code>' + batch.slot_range + '</code></td>' +
                 '<td>' + batch.avg_latency.toFixed(2) + 's</td>' +
