@@ -250,7 +250,35 @@ type SemVer struct {
 	Patch int
 }
 
-// ParseSemVer парсит строку версии вида "v1.18.23" или "1.18.23" в структуру SemVer
+// BinaryType определяет тип бинарника Solana
+type BinaryType string
+
+const (
+	BinaryTypeAgave      BinaryType = "agave"      // Agave: версии вида "3.1.4"
+	BinaryTypeFiredancer BinaryType = "firedancer" // Firedancer: версии вида "0.809.30106"
+)
+
+// DetectBinaryType определяет тип бинарника по формату версии
+// Agave: major >= 1 или формат с 3 частями, где major > 0
+// Firedancer: major == 0 и формат с 4 частями (0.809.30106)
+func DetectBinaryType(version string) BinaryType {
+	version = strings.TrimPrefix(version, "v")
+	parts := strings.Split(version, ".")
+	
+	// Firedancer имеет формат 0.809.30106 (4 части, major == 0)
+	if len(parts) == 4 {
+		if major, err := strconv.Atoi(parts[0]); err == nil && major == 0 {
+			return BinaryTypeFiredancer
+		}
+	}
+	
+	// Agave имеет формат 3.1.4 (3 части, major >= 1)
+	return BinaryTypeAgave
+}
+
+// ParseSemVer парсит строку версии вида "v1.18.23", "1.18.23" или "0.809.30106" в структуру SemVer
+// Поддерживает формат Solana с 4 частями (0.809.30106), где 0.809 - основная версия, 30106 - build number
+// Для сравнения используем первые 3 части, игнорируя build number
 func ParseSemVer(version string) (SemVer, error) {
 	// Убираем префикс "v" если есть
 	version = strings.TrimPrefix(version, "v")
@@ -258,7 +286,7 @@ func ParseSemVer(version string) (SemVer, error) {
 	// Разбиваем по точкам
 	parts := strings.Split(version, ".")
 	if len(parts) < 3 {
-		return SemVer{}, fmt.Errorf("invalid semver format: %s", version)
+		return SemVer{}, fmt.Errorf("invalid semver format: %s (need at least 3 parts)", version)
 	}
 
 	major, err := strconv.Atoi(parts[0])
@@ -272,6 +300,8 @@ func ParseSemVer(version string) (SemVer, error) {
 	}
 
 	// Patch может содержать суффиксы типа "-beta", отсекаем их
+	// Также поддерживаем формат Solana с 4 частями (0.809.30106) - используем первые 3 части
+	// Если есть 4-я часть (build number), она игнорируется для сравнения
 	patchStr := strings.Split(parts[2], "-")[0]
 	patch, err := strconv.Atoi(patchStr)
 	if err != nil {

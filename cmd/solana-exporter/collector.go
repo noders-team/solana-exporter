@@ -400,6 +400,18 @@ func (c *SolanaCollector) collectVersionComparison(ctx context.Context, ch chan<
 		return
 	}
 
+	// Проверяем, что сравниваем версии одного типа бинарника
+	currentType := DetectBinaryType(currentVersion)
+	referenceType := DetectBinaryType(referenceVersion)
+
+	if currentType != referenceType {
+		c.logger.Warnf("Cannot compare versions of different binary types: current=%s (%s), reference=%s (%s). Skipping comparison.",
+			currentVersion, currentType, referenceVersion, referenceType)
+		// Возвращаем 0 (не outdated), так как нельзя сравнить разные типы
+		ch <- c.NodeVersionOutdated.MustNewConstMetric(0, currentVersion, referenceVersion)
+		return
+	}
+
 	currentSemVer, err := ParseSemVer(currentVersion)
 	if err != nil {
 		c.logger.Errorf("failed to parse current version '%s': %v", currentVersion, err)
@@ -417,7 +429,8 @@ func (c *SolanaCollector) collectVersionComparison(ctx context.Context, ch chan<
 	isOutdated := BoolToFloat64(currentSemVer.IsOlderThan(referenceSemVer))
 	ch <- c.NodeVersionOutdated.MustNewConstMetric(isOutdated, currentVersion, referenceVersion)
 
-	c.logger.Infof("Version comparison: current=%s, reference=%s, outdated=%v", currentVersion, referenceVersion, isOutdated == 1)
+	c.logger.Infof("Version comparison: current=%s (%s), reference=%s (%s), outdated=%v",
+		currentVersion, currentType, referenceVersion, referenceType, isOutdated == 1)
 }
 
 func (c *SolanaCollector) collectIdentity(ctx context.Context, ch chan<- prometheus.Metric) {
