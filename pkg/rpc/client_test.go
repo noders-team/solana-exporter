@@ -398,6 +398,10 @@ func TestClient_GetVoteAccounts(t *testing.T) {
 					ActivatedStake: 42,
 					VotePubkey:     "3ZT31jkAGhUaw8jsy4bTknwBMP8i4Eueh52By4zXcsVw",
 					Commission:     11,
+					EpochCredits: [][]any{
+						{float64(1), float64(64), float64(0)},
+						{float64(2), float64(192), float64(64)},
+					},
 				},
 			},
 		},

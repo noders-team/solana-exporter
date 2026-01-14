@@ -2,9 +2,10 @@ package rpc
 
 import (
 	"context"
-	"github.com/stretchr/testify/assert"
 	"sort"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestMockServer_getBalance(t *testing.T) {
@@ -142,11 +143,11 @@ func TestMockServer_getVoteAccounts(t *testing.T) {
 	assert.Equal(t,
 		VoteAccounts{
 			Current: []VoteAccount{
-				{1, 2, "aaa", 10, "AAA", 11},
-				{3, 4, "bbb", 11, "BBB", 12},
+				{1, 2, "aaa", 10, "AAA", 11, nil},
+				{3, 4, "bbb", 11, "BBB", 12, nil},
 			},
 			Delinquent: []VoteAccount{
-				{5, 6, "ccc", 12, "CCC", 13},
+				{5, 6, "ccc", 12, "CCC", 13, nil},
 			},
 		},
 		*voteAccounts,

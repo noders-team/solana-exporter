@@ -241,6 +241,8 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 		totalStake  float64
 		maxLastVote float64
 		maxRootSlot float64
+		// New: Track max credits earned in current epoch for JPool-style relative performance
+		maxEpochCreditsEarned int64
 	)
 
 	// Get current epoch info for credits calculation
@@ -251,6 +253,44 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 		epochInfoErr = err
 	}
 
+	// First pass: Calculate cluster-wide metrics and find MAX credits earned
+	for _, account := range append(voteAccounts.Current, voteAccounts.Delinquent...) {
+		// Existing cluster metric logic...
+		stake, lastVote, rootSlot :=
+			float64(account.ActivatedStake)/rpc.LamportsInSol,
+			float64(account.LastVote),
+			float64(account.RootSlot)
+
+		totalStake += stake
+		maxLastVote = max(maxLastVote, lastVote)
+		maxRootSlot = max(maxRootSlot, rootSlot)
+
+		// Calculate credits earned by this validator to find cluster MAX
+		if epochInfo != nil {
+			var currentEpochCredits, previousEpochCredits int64
+			// Parse EpochCredits (now available in struct)
+			for _, creditData := range account.EpochCredits {
+				// Each creditData is [epoch, credits, prevCredits]
+				// We need to safely cast generic interface{} to numbers
+				if len(creditData) >= 3 {
+					epoch, _ := asInt64(creditData[0])
+					credits, _ := asInt64(creditData[1])
+					prevCredits, _ := asInt64(creditData[2])
+
+					if epoch == epochInfo.Epoch {
+						currentEpochCredits = credits
+						previousEpochCredits = prevCredits
+						break
+					}
+				}
+			}
+			creditsEarned := currentEpochCredits - previousEpochCredits
+			if creditsEarned > maxEpochCreditsEarned {
+				maxEpochCreditsEarned = creditsEarned
+			}
+		}
+	}
+
 	// Helper function to check if validator should be monitored
 	shouldMonitorValidator := func(nodekey, votekey string) bool {
 		return c.config.ComprehensiveVoteAccountTracking ||
@@ -258,7 +298,12 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 			slices.Contains(c.config.Votekeys, votekey)
 	}
 
+	// Second pass: Emit metrics for monitored validators
 	for _, account := range append(voteAccounts.Current, voteAccounts.Delinquent...) {
+		if !shouldMonitorValidator(account.NodePubkey, account.VotePubkey) {
+			continue
+		}
+
 		accounts := []string{account.VotePubkey, account.NodePubkey}
 		stake, lastVote, rootSlot, commission :=
 			float64(account.ActivatedStake)/rpc.LamportsInSol,
@@ -266,31 +311,24 @@ func (c *SolanaCollector) collectVoteAccounts(ctx context.Context, ch chan<- pro
 			float64(account.RootSlot),
 			float64(account.Commission)
 
-		// Always accumulate cluster metrics from all validators
-		totalStake += stake
-		maxLastVote = max(maxLastVote, lastVote)
-		maxRootSlot = max(maxRootSlot, rootSlot)
+		ch <- c.ValidatorActiveStake.MustNewConstMetric(stake, accounts...)
+		ch <- c.ValidatorLastVote.MustNewConstMetric(lastVote, accounts...)
+		ch <- c.ValidatorRootSlot.MustNewConstMetric(rootSlot, accounts...)
+		ch <- c.ValidatorCommission.MustNewConstMetric(commission, accounts...)
 
-		// Only collect validator-specific metrics for monitored validators
-		if shouldMonitorValidator(account.NodePubkey, account.VotePubkey) {
-			ch <- c.ValidatorActiveStake.MustNewConstMetric(stake, accounts...)
-			ch <- c.ValidatorLastVote.MustNewConstMetric(lastVote, accounts...)
-			ch <- c.ValidatorRootSlot.MustNewConstMetric(rootSlot, accounts...)
-			ch <- c.ValidatorCommission.MustNewConstMetric(commission, accounts...)
-
-			// Collect vote credits metrics if epoch info is available
-			if epochInfo != nil {
-				c.collectVoteCreditsMetrics(ctx, ch, account, epochInfo, accounts...)
-			} else if epochInfoErr != nil {
-				// Emit invalid metrics if epoch info failed
-				ch <- c.ValidatorEpochCredits.NewInvalidMetric(epochInfoErr)
-				ch <- c.ValidatorExpectedCredits.NewInvalidMetric(epochInfoErr)
-				ch <- c.ValidatorCreditsMissed.NewInvalidMetric(epochInfoErr)
-			}
-
-			// Collect vote batch metrics for detailed TVC analysis
-			c.voteBatchAnalyzer.CollectVoteBatchMetrics(ctx, ch, account.NodePubkey, account.VotePubkey)
+		// Collect vote credits metrics if epoch info is available
+		if epochInfo != nil {
+			// Pass maxEpochCreditsEarned to the calculation function
+			c.collectVoteCreditsMetrics(ctx, ch, account, epochInfo, maxEpochCreditsEarned, accounts...)
+		} else if epochInfoErr != nil {
+			// Emit invalid metrics if epoch info failed
+			ch <- c.ValidatorEpochCredits.NewInvalidMetric(epochInfoErr)
+			ch <- c.ValidatorExpectedCredits.NewInvalidMetric(epochInfoErr)
+			ch <- c.ValidatorCreditsMissed.NewInvalidMetric(epochInfoErr)
 		}
+
+		// Collect vote batch metrics for detailed TVC analysis
+		c.voteBatchAnalyzer.CollectVoteBatchMetrics(ctx, ch, account.NodePubkey, account.VotePubkey)
 	}
 
 	{
@@ -321,6 +359,7 @@ func (c *SolanaCollector) collectVoteCreditsMetrics(
 	ch chan<- prometheus.Metric,
 	account rpc.VoteAccount,
 	epochInfo *rpc.EpochInfo,
+	maxEpochCreditsEarned int64,
 	labelValues ...string,
 ) {
 	// Get detailed vote account data from cache
@@ -352,16 +391,19 @@ func (c *SolanaCollector) collectVoteCreditsMetrics(
 	// Calculate credits earned this epoch
 	epochCreditsEarned := currentEpochCredits - previousEpochCredits
 
-	// Calculate expected credits based on slot progress in epoch
-	slotsInCurrentEpoch := epochInfo.SlotIndex + 1 // +1 because SlotIndex is 0-based
-	expectedCredits := slotsInCurrentEpoch         // Ideally, 1 credit per slot
+	// Calculate expected credits: Use Cluster Max Credits as the benchmark (JPool style)
+	// If clusterMax is 0 (start of epoch), fallback to earned credits (100% performance)
+	expectedCredits := maxEpochCreditsEarned
+	if expectedCredits == 0 {
+		expectedCredits = epochCreditsEarned
+	}
 
-	// Calculate percentage of credits missed
+	// Calculate percentage of credits missed (Relative to Cluster Leader)
 	var creditsMissedPct float64
 	if expectedCredits > 0 {
 		creditsMissedPct = float64(expectedCredits-epochCreditsEarned) / float64(expectedCredits) * 100.0
 		if creditsMissedPct < 0 {
-			creditsMissedPct = 0 // Can't miss negative credits
+			creditsMissedPct = 0 // Should not happen if expected is truly max, but safety first
 		}
 	}
 
@@ -370,6 +412,23 @@ func (c *SolanaCollector) collectVoteCreditsMetrics(
 	ch <- c.ValidatorEpochCredits.MustNewConstMetric(float64(epochCreditsEarned), labelsWithEpoch...)
 	ch <- c.ValidatorExpectedCredits.MustNewConstMetric(float64(expectedCredits), labelsWithEpoch...)
 	ch <- c.ValidatorCreditsMissed.MustNewConstMetric(creditsMissedPct, labelsWithEpoch...)
+}
+
+// Helper to safely cast interface{} from JSON decoding to int64
+func asInt64(v any) (int64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return int64(val), true
+	case int64:
+		return val, true
+	case int:
+		return int64(val), true
+	case string:
+		i, err := strconv.ParseInt(val, 10, 64)
+		return i, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func (c *SolanaCollector) collectVersion(ctx context.Context, ch chan<- prometheus.Metric) {

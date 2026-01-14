@@ -43,10 +43,11 @@ type (
 	VoteAccount struct {
 		ActivatedStake int64  `json:"activatedStake"`
 		LastVote       int    `json:"lastVote"`
-		NodePubkey     string `json:"nodePubkey"`
-		RootSlot       int    `json:"rootSlot"`
-		VotePubkey     string `json:"votePubkey"`
-		Commission     int64  `json:"commission"`
+		NodePubkey     string  `json:"nodePubkey"`
+		RootSlot       int     `json:"rootSlot"`
+		VotePubkey     string  `json:"votePubkey"`
+		Commission     int64   `json:"commission"`
+		EpochCredits   [][]any `json:"epochCredits"`
 	}
 
 	VoteAccounts struct {
