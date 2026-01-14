@@ -309,87 +309,65 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 	// - Latency 1-2: 8 credits (grace period)
 	// - Latency 3: 7 credits, Latency 4: 6 credits, etc.
 	// - Minimum: 1 credit (never 0)
+	//
+	// CRITICAL: We calculate for the ENTIRE batch (20000 slots), not just "active range"
+	// The "active range" approach was incorrect - validators should vote for all slots in batch
 
-	var activeRangeStart, activeRangeEnd int64
 	var totalEarnedCredits int64
 	var maxPossibleCredits int64
 
-	if len(batch.Votes) > 0 {
-		// Find first and last vote slots in batch
-		activeRangeStart = batch.Votes[0].Slot
-		activeRangeEnd = batch.Votes[len(batch.Votes)-1].Slot
+	// Calculate earned credits based on vote latencies
+	// Use actual latency from vote state if available, otherwise estimate from ConfirmationCount
+	for _, vote := range batch.Votes {
+		if vote.Slot >= batch.StartSlot && vote.Slot <= batch.EndSlot {
+			var latency int64
 
-		// For live batch, extend to current slot to show real-time progress
-		if isLiveBatch {
-			activeRangeEnd = currentSlot
-		}
-
-		// Active range = slots from first vote to last vote (or current slot for live)
-		activeRangeSlots := activeRangeEnd - activeRangeStart + 1
-		if activeRangeSlots < 0 {
-			activeRangeSlots = 0
-		}
-
-		// Calculate earned credits based on vote latencies
-		// Use actual latency from vote state if available, otherwise estimate from ConfirmationCount
-		for _, vote := range batch.Votes {
-			if vote.Slot >= batch.StartSlot && vote.Slot <= batch.EndSlot {
-				var latency int64
-
-				// Use actual latency from vote state if available (from bincode deserialization)
-				if vote.Latency != nil {
-					latency = int64(*vote.Latency)
-					// Log first few to confirm it's working
-					if len(batch.Votes) <= 5 || vote.Slot == batch.Votes[0].Slot {
-						v.logger.Infof("Using ACTUAL latency %d for slot %d (from vote state)", latency, vote.Slot)
-					}
-				} else {
-					// Fallback: estimate latency based on ConfirmationCount
-					// ConfirmationCount = 0: vote sent early, assume latency 1-2 (max 8 credits)
-					// ConfirmationCount > 0: validator waited for confirmations, estimate higher latency
-					latency = int64(1) // Default to grace period (max credits)
-					if vote.ConfirmationCount > 0 {
-						// If validator waited for confirmations, estimate higher latency
-						latency = vote.ConfirmationCount + 1
-					}
-					// Log first few to confirm fallback is used
-					if len(batch.Votes) <= 5 || vote.Slot == batch.Votes[0].Slot {
-						v.logger.Infof("Using ESTIMATED latency %d (from ConfirmationCount %d) for slot %d",
-							latency, vote.ConfirmationCount, vote.Slot)
-					}
+			// Use actual latency from vote state if available (from bincode deserialization)
+			if vote.Latency != nil {
+				latency = int64(*vote.Latency)
+				// Log first few to confirm it's working
+				if len(batch.Votes) <= 5 || vote.Slot == batch.Votes[0].Slot {
+					v.logger.Infof("Using ACTUAL latency %d for slot %d (from vote state)", latency, vote.Slot)
 				}
-
-				// Calculate credits based on latency (TVC formula from SIMD)
-				credits := v.calculateTVCForLatency(latency)
-				totalEarnedCredits += credits
+			} else {
+				// Fallback: estimate latency based on ConfirmationCount
+				// ConfirmationCount = 0: vote sent early, assume latency 1-2 (max 8 credits)
+				// ConfirmationCount > 0: validator waited for confirmations, estimate higher latency
+				latency = int64(1) // Default to grace period (max credits)
+				if vote.ConfirmationCount > 0 {
+					// If validator waited for confirmations, estimate higher latency
+					latency = vote.ConfirmationCount + 1
+				}
+				// Log first few to confirm fallback is used
+				if len(batch.Votes) <= 5 || vote.Slot == batch.Votes[0].Slot {
+					v.logger.Infof("Using ESTIMATED latency %d (from ConfirmationCount %d) for slot %d",
+						latency, vote.ConfirmationCount, vote.Slot)
+				}
 			}
+
+			// Calculate credits based on latency (TVC formula from SIMD)
+			credits := v.calculateTVCForLatency(latency)
+			totalEarnedCredits += credits
 		}
-
-		// Maximum possible credits = all slots in active range * max credits per vote (8)
-		maxPossibleCredits = activeRangeSlots * MaxTVCPerVote
-
-		// Missed TVCs = max possible credits - earned credits
-		batch.MissedTVCs = maxPossibleCredits - totalEarnedCredits
-		if batch.MissedTVCs < 0 {
-			batch.MissedTVCs = 0
-		}
-
-		// Missed slots = active range slots - voted slots (for display)
-		batch.MissedSlots = activeRangeSlots - batch.VotedSlots
-		if batch.MissedSlots < 0 {
-			batch.MissedSlots = 0
-		}
-
-		// For performance calculation, use active range
-		batch.TotalSlots = activeRangeSlots
-	} else {
-		// No votes in batch - can't calculate meaningful metrics
-		batch.MissedSlots = 0
-		batch.MissedTVCs = 0
-		// Keep original TotalSlots for display
 	}
 
-	// Calculate performance based on earned credits vs max possible credits
+	// Maximum possible credits = all slots in batch * max credits per vote (8)
+	// For live batch, use current slot; for completed batch, use full 20000 slots
+	maxPossibleCredits = batch.TotalSlots * MaxTVCPerVote
+
+	// Missed TVCs = max possible credits - earned credits
+	batch.MissedTVCs = maxPossibleCredits - totalEarnedCredits
+	if batch.MissedTVCs < 0 {
+		batch.MissedTVCs = 0
+	}
+
+	// Missed slots = total slots in batch - voted slots
+	batch.MissedSlots = batch.TotalSlots - batch.VotedSlots
+	if batch.MissedSlots < 0 {
+		batch.MissedSlots = 0
+	}
+
+	// Calculate performance based on earned credits vs max possible credits for entire batch
 	if maxPossibleCredits > 0 {
 		batch.Performance = float64(totalEarnedCredits) / float64(maxPossibleCredits) * 100.0
 	} else if batch.TotalSlots > 0 {
