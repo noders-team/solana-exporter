@@ -133,6 +133,25 @@ func GetAccountInfo[T any](
 	return &resp.Result.Value, nil
 }
 
+// GetAccountInfoRaw returns raw account data as base64 string.
+// This is needed to deserialize VoteState with latency information.
+// See API docs: https://solana.com/docs/rpc/http/getaccountinfo
+func GetAccountInfoRaw(
+	ctx context.Context, client *Client, commitment Commitment, address string,
+) (string, error) {
+	var resp Response[contextualResult[AccountInfo[struct{}]]]
+	config := map[string]string{"commitment": string(commitment), "encoding": "base64"}
+	if err := getResponse(ctx, client, "getAccountInfo", []any{address, config}, &resp); err != nil {
+		return "", err
+	}
+
+	if len(resp.Result.Value.Data.Data) == 0 {
+		return "", fmt.Errorf("no data returned for account %s", address)
+	}
+
+	return resp.Result.Value.Data.Data[0], nil
+}
+
 // GetEpochInfo returns information about the current epoch.
 // See API docs: https://solana.com/docs/rpc/http/getepochinfo
 func (c *Client) GetEpochInfo(ctx context.Context, commitment Commitment) (*EpochInfo, error) {

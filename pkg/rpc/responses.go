@@ -103,9 +103,10 @@ type (
 	}
 
 	accountInfoData[T any] struct {
-		Parsed  accountInfoParsedData[T] `json:"parsed"`
-		Program string                   `json:"program"`
-		Space   int64                    `json:"space"`
+		Parsed  accountInfoParsedData[T] `json:"parsed,omitempty"`
+		Data    []string                  `json:"data,omitempty"` // Raw base64 data when encoding is base64
+		Program string                    `json:"program"`
+		Space   int64                     `json:"space"`
 	}
 
 	accountInfoParsedData[T any] struct {

@@ -25,6 +25,11 @@ const (
 	MinBatchSize      = 100   // Minimum slots to consider as a batch
 	MaxLatencySeconds = 30    // Maximum expected voting latency
 	FixedBatchSize    = 20000 // Fixed batch size in slots (each batch = 20000 slots)
+
+	// Timely Vote Credits (TVC) parameters (from SIMD)
+	MaxTVCPerVote  = 8 // Maximum credits for latency 1-2 (grace period)
+	TVCGracePeriod = 2 // Grace period slots (latency 1-2 = max credits)
+	MinTVCPerVote  = 1 // Minimum credits (never 0)
 )
 
 type (
@@ -71,8 +76,9 @@ type (
 
 	// Vote represents a validator vote (local copy from rpc package)
 	Vote struct {
-		ConfirmationCount int64 `json:"confirmationCount"`
-		Slot              int64 `json:"slot"`
+		ConfirmationCount int64  `json:"confirmationCount"`
+		Slot              int64  `json:"slot"`
+		Latency           *uint8 `json:"latency,omitempty"` // Actual latency from vote state (if available)
 	}
 )
 
@@ -151,6 +157,7 @@ func (v *VoteBatchAnalyzer) AnalyzeVoteBatches(
 		votes[i] = Vote{
 			ConfirmationCount: v.ConfirmationCount,
 			Slot:              v.Slot,
+			Latency:           v.Latency, // Include latency if available from vote state
 		}
 	}
 	sort.Slice(votes, func(i, j int) bool {
@@ -297,13 +304,16 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 	}
 	batch.VotedSlots = int64(len(votedSlotMap))
 
-	// Calculate missed slots and TVCs
-	// IMPORTANT: In Solana, validators don't vote for every slot - they only vote for blocks they confirm
-	// The issue: we can't know which slots had blocks that needed voting
-	// Solution: Calculate missed slots only in the "active voting window" - from first vote to last vote
-	// This gives a more realistic performance metric
+	// Calculate missed slots and TVCs using Timely Vote Credits (TVC) logic
+	// IMPORTANT: TVC now depends on vote latency, not just 1 credit per slot!
+	// - Latency 1-2: 8 credits (grace period)
+	// - Latency 3: 7 credits, Latency 4: 6 credits, etc.
+	// - Minimum: 1 credit (never 0)
 
 	var activeRangeStart, activeRangeEnd int64
+	var totalEarnedCredits int64
+	var maxPossibleCredits int64
+
 	if len(batch.Votes) > 0 {
 		// Find first and last vote slots in batch
 		activeRangeStart = batch.Votes[0].Slot
@@ -320,18 +330,51 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 			activeRangeSlots = 0
 		}
 
-		// Missed slots = active range slots - voted slots
-		// This shows gaps in voting within the active window
+		// Calculate earned credits based on vote latencies
+		// Use actual latency from vote state if available, otherwise estimate from ConfirmationCount
+		for _, vote := range batch.Votes {
+			if vote.Slot >= batch.StartSlot && vote.Slot <= batch.EndSlot {
+				var latency int64
+
+				// Use actual latency from vote state if available (from bincode deserialization)
+				if vote.Latency != nil {
+					latency = int64(*vote.Latency)
+					v.logger.Debugf("Using actual latency %d for slot %d", latency, vote.Slot)
+				} else {
+					// Fallback: estimate latency based on ConfirmationCount
+					// ConfirmationCount = 0: vote sent early, assume latency 1-2 (max 8 credits)
+					// ConfirmationCount > 0: validator waited for confirmations, estimate higher latency
+					latency = int64(1) // Default to grace period (max credits)
+					if vote.ConfirmationCount > 0 {
+						// If validator waited for confirmations, estimate higher latency
+						latency = vote.ConfirmationCount + 1
+					}
+					v.logger.Debugf("Using estimated latency %d (from ConfirmationCount %d) for slot %d",
+						latency, vote.ConfirmationCount, vote.Slot)
+				}
+
+				// Calculate credits based on latency (TVC formula from SIMD)
+				credits := v.calculateTVCForLatency(latency)
+				totalEarnedCredits += credits
+			}
+		}
+
+		// Maximum possible credits = all slots in active range * max credits per vote (8)
+		maxPossibleCredits = activeRangeSlots * MaxTVCPerVote
+
+		// Missed TVCs = max possible credits - earned credits
+		batch.MissedTVCs = maxPossibleCredits - totalEarnedCredits
+		if batch.MissedTVCs < 0 {
+			batch.MissedTVCs = 0
+		}
+
+		// Missed slots = active range slots - voted slots (for display)
 		batch.MissedSlots = activeRangeSlots - batch.VotedSlots
 		if batch.MissedSlots < 0 {
 			batch.MissedSlots = 0
 		}
 
-		// Missed TVCs = missed slots in active range
-		batch.MissedTVCs = batch.MissedSlots
-
-		// For performance calculation, use active range instead of full batch
-		// This gives more meaningful percentage (e.g., 31 votes out of 37 slots = 83.8%)
+		// For performance calculation, use active range
 		batch.TotalSlots = activeRangeSlots
 	} else {
 		// No votes in batch - can't calculate meaningful metrics
@@ -340,8 +383,11 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 		// Keep original TotalSlots for display
 	}
 
-	// Calculate performance
-	if batch.TotalSlots > 0 {
+	// Calculate performance based on earned credits vs max possible credits
+	if maxPossibleCredits > 0 {
+		batch.Performance = float64(totalEarnedCredits) / float64(maxPossibleCredits) * 100.0
+	} else if batch.TotalSlots > 0 {
+		// Fallback to slot-based performance if no credits calculated
 		batch.Performance = float64(batch.VotedSlots) / float64(batch.TotalSlots) * 100.0
 	} else {
 		batch.Performance = 0.0
@@ -430,6 +476,25 @@ func (v *VoteBatchAnalyzer) finalizeBatch(batch VoteBatch, currentSlot int64, ba
 	batch.StartTime = v.estimateSlotTime(batch.StartSlot, currentSlot)
 
 	return batch
+}
+
+// calculateTVCForLatency calculates TVC credits based on vote latency
+// Formula from SIMD: Latency 1-2 = 8 credits, then -1 credit per additional slot, minimum 1
+func (v *VoteBatchAnalyzer) calculateTVCForLatency(latency int64) int64 {
+	if latency <= TVCGracePeriod {
+		// Grace period: latency 1-2 = max credits (8)
+		return MaxTVCPerVote
+	}
+
+	// After grace period: 8 - (latency - 2)
+	credits := MaxTVCPerVote - (latency - TVCGracePeriod)
+
+	// Minimum is 1 credit (never 0)
+	if credits < MinTVCPerVote {
+		credits = MinTVCPerVote
+	}
+
+	return credits
 }
 
 // estimateAverageLatency estimates voting latency based on slot progression

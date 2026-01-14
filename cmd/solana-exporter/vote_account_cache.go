@@ -41,6 +41,7 @@ func NewVoteAccountCache(rpcClient *rpc.Client) *VoteAccountCache {
 }
 
 // Get retrieves vote account data from cache or fetches it if not cached or expired
+// Also fetches latency data from raw vote state if available
 func (c *VoteAccountCache) Get(ctx context.Context, votekey string) (*rpc.VoteAccountData, error) {
 	// Check cache first
 	c.mu.RLock()
@@ -58,6 +59,44 @@ func (c *VoteAccountCache) Get(ctx context.Context, votekey string) (*rpc.VoteAc
 	_, err := rpc.GetAccountInfo(ctx, c.rpcClient, rpc.CommitmentFinalized, votekey, &voteAccountData)
 	if err != nil {
 		return nil, err
+	}
+
+	// Try to get latency data from raw vote state
+	rawData, err := rpc.GetAccountInfoRaw(ctx, c.rpcClient, rpc.CommitmentFinalized, votekey)
+	if err == nil && rawData != "" {
+		c.logger.Debugf("Got raw vote account data, length: %d chars", len(rawData))
+		latencies, err := rpc.DeserializeVoteStateLatencies(rawData)
+		if err == nil && len(latencies) > 0 {
+			// Map latencies to votes by slot
+			latencyMap := make(map[int64]uint8)
+			for _, lat := range latencies {
+				latencyMap[int64(lat.Slot)] = lat.Latency
+			}
+
+			// Update votes with latency information
+			latencyCount := 0
+			for i := range voteAccountData.Votes {
+				if latency, ok := latencyMap[voteAccountData.Votes[i].Slot]; ok {
+					voteAccountData.Votes[i].Latency = &latency
+					latencyCount++
+				}
+			}
+
+			c.logger.Infof("Successfully extracted latency data: %d latencies from vote state, matched %d/%d votes", 
+				len(latencies), latencyCount, len(voteAccountData.Votes))
+		} else {
+			if err != nil {
+				c.logger.Warnf("Failed to deserialize vote state latencies: %v (using estimated latency)", err)
+			} else {
+				c.logger.Warnf("No latencies extracted from vote state (got 0 latencies) (using estimated latency)")
+			}
+		}
+	} else {
+		if err != nil {
+			c.logger.Debugf("Failed to get raw vote account data: %v (using estimated latency)", err)
+		} else {
+			c.logger.Debugf("Raw vote account data is empty (using estimated latency)")
+		}
 	}
 
 	// Update cache

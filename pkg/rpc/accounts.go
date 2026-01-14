@@ -32,5 +32,6 @@ type (
 	vote struct {
 		ConfirmationCount int64 `json:"confirmationCount"`
 		Slot              int64 `json:"slot"`
+		Latency           *uint8 `json:"latency,omitempty"` // Latency from vote state (if available)
 	}
 )
