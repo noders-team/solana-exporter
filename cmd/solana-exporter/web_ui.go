@@ -61,15 +61,18 @@ type VoteCreditsData struct {
 }
 
 type VoteBatchData struct {
-	BatchID        int     `json:"batch_id"`
-	SlotRange      string  `json:"slot_range"`
-	StartTime      string  `json:"start_time"`
-	MissedTVCs     int64   `json:"missed_tvcs"`
-	MissedSlots    int64   `json:"missed_slots"`
-	AvgLatency     float64 `json:"avg_latency"`
-	Performance    float64 `json:"performance"`
-	TotalSlots     int64   `json:"total_slots"`
-	IsLive         bool    `json:"is_live"` // True for current batch being tracked in real-time
+	BatchID       int     `json:"batch_id"`
+	SlotRange     string  `json:"slot_range"`
+	StartTime     string  `json:"start_time"`
+	AvgLatency    float64 `json:"avg_latency"`
+	VoteCount     int64   `json:"vote_count"`
+	EarnedCredits int64   `json:"earned_credits"`
+	TotalSlots    int64   `json:"total_slots"`
+	IsLive        bool    `json:"is_live"` // True for current batch being tracked in real-time
+	// Deprecated fields (kept for backward compatibility)
+	MissedTVCs    int64   `json:"missed_tvcs"`
+	MissedSlots   int64   `json:"missed_slots"`
+	Performance   float64 `json:"performance"`
 }
 
 type NetworkActivityData struct {
@@ -205,15 +208,18 @@ func (w *WebUI) handleAPIVoteBatches(writer http.ResponseWriter, request *http.R
 	if len(batches) > 0 {
 		latestBatch := batches[len(batches)-1]
 		currentBatchData = &VoteBatchData{
-			BatchID:     latestBatch.ID,
-			SlotRange:   latestBatch.SlotRange,
-			StartTime:   latestBatch.StartTime.Format("02.01.2006 15:04:05"),
-			MissedTVCs:  latestBatch.MissedTVCs,
-			MissedSlots: latestBatch.MissedSlots,
-			AvgLatency:  latestBatch.AvgLatency,
-			Performance: latestBatch.Performance,
-			TotalSlots:  latestBatch.TotalSlots,
-			IsLive:      true, // Mark as live batch
+			BatchID:       latestBatch.ID,
+			SlotRange:     latestBatch.SlotRange,
+			StartTime:     latestBatch.StartTime.Format("02.01.2006 15:04:05"),
+			AvgLatency:    latestBatch.AvgLatency,
+			VoteCount:     latestBatch.VoteCount,
+			EarnedCredits: latestBatch.EarnedCredits,
+			TotalSlots:    latestBatch.TotalSlots,
+			IsLive:        true, // Mark as live batch
+			// Deprecated fields (kept for backward compatibility)
+			MissedTVCs:    latestBatch.MissedTVCs,
+			MissedSlots:   latestBatch.MissedSlots,
+			Performance:   latestBatch.Performance,
 		}
 	}
 
@@ -240,15 +246,18 @@ func (w *WebUI) handleAPIVoteBatches(writer http.ResponseWriter, request *http.R
 		const fixedBatchSize = 20000
 		if histBatch.TotalSlots == fixedBatchSize && histBatch.IsComplete {
 			batchData = append(batchData, VoteBatchData{
-				BatchID:     histBatch.BatchID,
-				SlotRange:   histBatch.SlotRange,
-				StartTime:   histBatch.Timestamp.Format("02.01.2006 15:04:05"),
-				MissedTVCs:  histBatch.MissedTVCs,
-				MissedSlots: histBatch.MissedSlots,
-				AvgLatency:  histBatch.AvgLatency,
-				Performance: histBatch.Performance,
-				TotalSlots:  histBatch.TotalSlots,
-				IsLive:      false, // Historical batch
+				BatchID:       histBatch.BatchID,
+				SlotRange:     histBatch.SlotRange,
+				StartTime:     histBatch.Timestamp.Format("02.01.2006 15:04:05"),
+				AvgLatency:    histBatch.AvgLatency,
+				VoteCount:     int64(histBatch.VoteCount),
+				EarnedCredits: 0, // Historical batches don't store earned credits, calculate if needed
+				TotalSlots:    histBatch.TotalSlots,
+				IsLive:        false, // Historical batch
+				// Deprecated fields (kept for backward compatibility)
+				MissedTVCs:    histBatch.MissedTVCs,
+				MissedSlots:   histBatch.MissedSlots,
+				Performance:   histBatch.Performance,
 			})
 		}
 	}
@@ -522,10 +531,10 @@ func (w *WebUI) getDashboardHTML() string {
                                             <th>Batch</th>
                                             <th>Start Time</th>
                                             <th>Slot Range</th>
+                                            <th>Vote Count</th>
                                             <th>Avg Latency</th>
-                                            <th>Missed TVCs</th>
-                                            <th>Missed Slots</th>
-                                            <th>Performance</th>
+                                            <th>Earned Credits</th>
+                                            <th>Total Slots</th>
                                         </tr>
                                     </thead>
                                     <tbody id="batch-table-body">
@@ -1216,19 +1225,24 @@ class SolanaDashboard {
         }
 
         const rows = batches.slice(0, 50).map((batch, index) => {
-            const performanceClass = this.getPerformanceClass(batch.performance);
             const isLive = batch.is_live || false;
             const liveIndicator = isLive ? ' <span class="live-indicator">● LIVE</span>' : '';
             const rowClass = isLive ? 'live-batch-row' : '';
+            
+            // Format latency
+            const latencyStr = batch.avg_latency ? batch.avg_latency.toFixed(2) + 's' : '--';
+            
+            // Format earned credits
+            const earnedCredits = batch.earned_credits || 0;
             
             return '<tr class="' + rowClass + '">' +
                 '<td>' + batch.batch_id + liveIndicator + '</td>' +
                 '<td>' + batch.start_time + '</td>' +
                 '<td><code>' + batch.slot_range + '</code></td>' +
-                '<td>' + batch.avg_latency.toFixed(2) + 's</td>' +
-                '<td class="' + (batch.missed_tvcs > 1000 ? 'text-warning' : '') + '">' + this.formatNumber(batch.missed_tvcs) + '</td>' +
-                '<td class="' + (batch.missed_slots > 0 ? 'text-warning' : '') + '">' + batch.missed_slots + '</td>' +
-                '<td class="' + performanceClass + '">' + batch.performance.toFixed(1) + '%</td>' +
+                '<td>' + this.formatNumber(batch.vote_count || 0) + '</td>' +
+                '<td>' + latencyStr + '</td>' +
+                '<td>' + this.formatNumber(earnedCredits) + '</td>' +
+                '<td>' + this.formatNumber(batch.total_slots || 0) + '</td>' +
                 '</tr>';
         }).join('');
 

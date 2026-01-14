@@ -35,18 +35,21 @@ const (
 type (
 	// VoteBatch represents a group of consecutive votes
 	VoteBatch struct {
-		ID          int       `json:"batch_id"`
-		StartTime   time.Time `json:"start_time"`
-		StartSlot   int64     `json:"start_slot"`
-		EndSlot     int64     `json:"end_slot"`
-		SlotRange   string    `json:"slot_range"`
-		AvgLatency  float64   `json:"avg_latency"`
-		MissedTVCs  int64     `json:"missed_tvcs"`
-		MissedSlots int64     `json:"missed_slots"`
-		TotalSlots  int64     `json:"total_slots"`
-		VotedSlots  int64     `json:"voted_slots"`
-		Votes       []Vote    `json:"votes"`
-		Performance float64   `json:"performance_pct"`
+		ID            int       `json:"batch_id"`
+		StartTime     time.Time `json:"start_time"`
+		StartSlot     int64     `json:"start_slot"`
+		EndSlot       int64     `json:"end_slot"`
+		SlotRange     string    `json:"slot_range"`
+		AvgLatency    float64   `json:"avg_latency"`
+		TotalSlots    int64     `json:"total_slots"`
+		VotedSlots    int64     `json:"voted_slots"`
+		VoteCount     int64     `json:"vote_count"`
+		EarnedCredits int64     `json:"earned_credits"` // Credits earned based on vote latencies
+		Votes         []Vote    `json:"votes"`
+		// Deprecated fields (kept for backward compatibility, always 0)
+		MissedTVCs  int64   `json:"missed_tvcs"`
+		MissedSlots int64   `json:"missed_slots"`
+		Performance float64 `json:"performance_pct"`
 	}
 
 	// VoteBatchAnalyzer analyzes vote patterns and detects gaps
@@ -374,30 +377,23 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 	}
 
 	actualVotes := int64(len(batch.Votes))
+	batch.VoteCount = actualVotes
+	batch.EarnedCredits = totalEarnedCredits
 
-	// Missed TVCs: Set to 0 - we cannot calculate this meaningfully
-	// Real TVC are in epochCredits, not in batch-level calculations
+	// Deprecated: Missed TVCs and Missed Slots don't make sense for batches
+	// Validators only vote for blocks they confirm, not every slot
+	// Real TVC are in epochCredits from RPC, not in batch-level calculations
 	batch.MissedTVCs = 0
-
-	// Missed slots: Show as 0 - this metric doesn't make sense for batches
-	// Validators don't vote for every slot, only for blocks they confirm
 	batch.MissedSlots = 0
 
-	// Performance: Based on vote frequency (actual vs expected)
-	// This shows if validator is voting more or less frequently than typical
-	// 100% = voting at expected frequency, >100% = voting more frequently (good!)
-	if expectedVotes > 0 {
-		batch.Performance = float64(actualVotes) / float64(expectedVotes) * 100.0
-		// Cap at 200% to avoid misleading high percentages
-		if batch.Performance > 200.0 {
-			batch.Performance = 200.0
-		}
-	} else {
-		batch.Performance = 0.0
-	}
+	// Deprecated: Performance based on vote frequency is misleading
+	// We show real metrics instead: vote count, earned credits, avg latency
+	batch.Performance = 0.0
 
-	// Calculate average latency
-	batch.AvgLatency = v.estimateAverageLatency(batch.Votes, currentSlot)
+	// Calculate average latency (already calculated above, but ensure it's set)
+	if latencyCount == 0 {
+		batch.AvgLatency = v.estimateAverageLatency(batch.Votes, currentSlot)
+	}
 
 	// Format slot range
 	batch.SlotRange = fmt.Sprintf("%d-%d", batch.StartSlot, batch.EndSlot)
