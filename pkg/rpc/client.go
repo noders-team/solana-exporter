@@ -136,20 +136,34 @@ func GetAccountInfo[T any](
 // GetAccountInfoRaw returns raw account data as base64 string.
 // This is needed to deserialize VoteState with latency information.
 // See API docs: https://solana.com/docs/rpc/http/getaccountinfo
+// When encoding is "base64", RPC returns data as array [base64_string, encoding_type]
 func GetAccountInfoRaw(
 	ctx context.Context, client *Client, commitment Commitment, address string,
 ) (string, error) {
-	var resp Response[contextualResult[AccountInfo[struct{}]]]
+	// For base64 encoding, the response structure is different:
+	// data field contains array [base64_string, "base64"] instead of object
+	type Base64AccountInfo struct {
+		Data       []string `json:"data"` // Array: [base64_string, "base64"]
+		Executable bool     `json:"executable"`
+		Lamports   int64    `json:"lamports"`
+		Owner      string   `json:"owner"`
+		RentEpoch  uint64   `json:"rentEpoch"`
+		Space      int64    `json:"space"`
+	}
+
+	var resp Response[contextualResult[Base64AccountInfo]]
 	config := map[string]string{"commitment": string(commitment), "encoding": "base64"}
 	if err := getResponse(ctx, client, "getAccountInfo", []any{address, config}, &resp); err != nil {
 		return "", err
 	}
 
-	if len(resp.Result.Value.Data.Data) == 0 {
+	if len(resp.Result.Value.Data) == 0 {
 		return "", fmt.Errorf("no data returned for account %s", address)
 	}
 
-	return resp.Result.Value.Data.Data[0], nil
+	// Data array format: [base64_string, "base64"]
+	// Return the first element which is the base64 encoded data
+	return resp.Result.Value.Data[0], nil
 }
 
 // GetEpochInfo returns information about the current epoch.
