@@ -62,9 +62,10 @@ func (c *VoteAccountCache) Get(ctx context.Context, votekey string) (*rpc.VoteAc
 	}
 
 	// Try to get latency data from raw vote state
+	c.logger.Infof("Attempting to fetch raw vote account data for latency extraction (votekey: %s)", votekey)
 	rawData, err := rpc.GetAccountInfoRaw(ctx, c.rpcClient, rpc.CommitmentFinalized, votekey)
 	if err == nil && rawData != "" {
-		c.logger.Debugf("Got raw vote account data, length: %d chars", len(rawData))
+		c.logger.Infof("Got raw vote account data, length: %d chars, attempting deserialization", len(rawData))
 		latencies, err := rpc.DeserializeVoteStateLatencies(rawData)
 		if err == nil && len(latencies) > 0 {
 			// Map latencies to votes by slot
@@ -93,9 +94,9 @@ func (c *VoteAccountCache) Get(ctx context.Context, votekey string) (*rpc.VoteAc
 		}
 	} else {
 		if err != nil {
-			c.logger.Debugf("Failed to get raw vote account data: %v (using estimated latency)", err)
+			c.logger.Warnf("Failed to get raw vote account data: %v (using estimated latency)", err)
 		} else {
-			c.logger.Debugf("Raw vote account data is empty (using estimated latency)")
+			c.logger.Warnf("Raw vote account data is empty (using estimated latency)")
 		}
 	}
 

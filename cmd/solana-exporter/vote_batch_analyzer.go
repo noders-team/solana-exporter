@@ -339,7 +339,10 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 				// Use actual latency from vote state if available (from bincode deserialization)
 				if vote.Latency != nil {
 					latency = int64(*vote.Latency)
-					v.logger.Debugf("Using actual latency %d for slot %d", latency, vote.Slot)
+					// Log first few to confirm it's working
+					if len(batch.Votes) <= 5 || vote.Slot == batch.Votes[0].Slot {
+						v.logger.Infof("Using ACTUAL latency %d for slot %d (from vote state)", latency, vote.Slot)
+					}
 				} else {
 					// Fallback: estimate latency based on ConfirmationCount
 					// ConfirmationCount = 0: vote sent early, assume latency 1-2 (max 8 credits)
@@ -349,8 +352,11 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 						// If validator waited for confirmations, estimate higher latency
 						latency = vote.ConfirmationCount + 1
 					}
-					v.logger.Debugf("Using estimated latency %d (from ConfirmationCount %d) for slot %d",
-						latency, vote.ConfirmationCount, vote.Slot)
+					// Log first few to confirm fallback is used
+					if len(batch.Votes) <= 5 || vote.Slot == batch.Votes[0].Slot {
+						v.logger.Infof("Using ESTIMATED latency %d (from ConfirmationCount %d) for slot %d",
+							latency, vote.ConfirmationCount, vote.Slot)
+					}
 				}
 
 				// Calculate credits based on latency (TVC formula from SIMD)
