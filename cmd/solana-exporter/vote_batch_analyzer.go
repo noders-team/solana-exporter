@@ -26,10 +26,10 @@ const (
 	MaxLatencySeconds = 30    // Maximum expected voting latency
 	FixedBatchSize    = 20000 // Fixed batch size in slots (each batch = 20000 slots)
 
-	// Timely Vote Credits (TVC) parameters (from SIMD)
-	MaxTVCPerVote  = 8 // Maximum credits for latency 1-2 (grace period)
-	TVCGracePeriod = 2 // Grace period slots (latency 1-2 = max credits)
-	MinTVCPerVote  = 1 // Minimum credits (never 0)
+	// Timely Vote Credits (TVC) parameters (from SIMD-0033)
+	MaxTVCPerVote  = 10 // Maximum credits for latency 1-3 (grace period)
+	TVCGracePeriod = 3  // Grace period slots (latency 1-3 = max credits)
+	MinTVCPerVote  = 1  // Minimum credits (never 0)
 )
 
 type (
@@ -304,17 +304,25 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 	}
 	batch.VotedSlots = int64(len(votedSlotMap))
 
-	// Calculate missed slots and TVCs using Timely Vote Credits (TVC) logic
-	// IMPORTANT: TVC now depends on vote latency, not just 1 credit per slot!
-	// - Latency 1-2: 8 credits (grace period)
-	// - Latency 3: 7 credits, Latency 4: 6 credits, etc.
+	// Calculate TVCs using Timely Vote Credits (TVC) logic from SIMD-0033
+	// IMPORTANT: TVC depends on vote latency!
+	// - Latency 1-3: 10 credits (grace period)
+	// - Latency 4: 9 credits, Latency 5: 8 credits, etc.
 	// - Minimum: 1 credit (never 0)
 	//
-	// CRITICAL: We calculate for the ENTIRE batch (20000 slots), not just "active range"
-	// The "active range" approach was incorrect - validators should vote for all slots in batch
+	// CRITICAL: Validators DON'T vote for every slot - they only vote for blocks they confirm!
+	// We CANNOT calculate "missed" TVCs because we don't know how many blocks were in the batch.
+	// Real TVC are already calculated by protocol and stored in epochCredits from getVoteAccounts.
+	//
+	// For batches, we show only REAL metrics:
+	// - Vote count (how many votes in this batch)
+	// - Average latency (from actual vote state)
+	// - Earned credits (calculated from latencies for display)
+	// - Performance is based on vote frequency vs typical (not "missed slots")
 
 	var totalEarnedCredits int64
-	var maxPossibleCredits int64
+	var totalLatencySum int64
+	var latencyCount int64
 
 	// Calculate earned credits based on vote latencies
 	// Use actual latency from vote state if available, otherwise estimate from ConfirmationCount
@@ -325,54 +333,65 @@ func (v *VoteBatchAnalyzer) finalizeFixedBatch(batch VoteBatch, currentSlot int6
 			// Use actual latency from vote state if available (from bincode deserialization)
 			if vote.Latency != nil {
 				latency = int64(*vote.Latency)
-				// Log first few to confirm it's working
-				if len(batch.Votes) <= 5 || vote.Slot == batch.Votes[0].Slot {
-					v.logger.Infof("Using ACTUAL latency %d for slot %d (from vote state)", latency, vote.Slot)
-				}
 			} else {
 				// Fallback: estimate latency based on ConfirmationCount
-				// ConfirmationCount = 0: vote sent early, assume latency 1-2 (max 8 credits)
-				// ConfirmationCount > 0: validator waited for confirmations, estimate higher latency
+				// ConfirmationCount = 0: vote sent early, assume latency 1-3 (max 10 credits)
 				latency = int64(1) // Default to grace period (max credits)
 				if vote.ConfirmationCount > 0 {
-					// If validator waited for confirmations, estimate higher latency
 					latency = vote.ConfirmationCount + 1
-				}
-				// Log first few to confirm fallback is used
-				if len(batch.Votes) <= 5 || vote.Slot == batch.Votes[0].Slot {
-					v.logger.Infof("Using ESTIMATED latency %d (from ConfirmationCount %d) for slot %d",
-						latency, vote.ConfirmationCount, vote.Slot)
 				}
 			}
 
-			// Calculate credits based on latency (TVC formula from SIMD)
+			// Calculate credits based on latency (TVC formula from SIMD-0033)
 			credits := v.calculateTVCForLatency(latency)
 			totalEarnedCredits += credits
+			totalLatencySum += latency
+			latencyCount++
 		}
 	}
 
-	// Maximum possible credits = all slots in batch * max credits per vote (8)
-	// For live batch, use current slot; for completed batch, use full 20000 slots
-	maxPossibleCredits = batch.TotalSlots * MaxTVCPerVote
-
-	// Missed TVCs = max possible credits - earned credits
-	batch.MissedTVCs = maxPossibleCredits - totalEarnedCredits
-	if batch.MissedTVCs < 0 {
-		batch.MissedTVCs = 0
+	// Calculate average latency for display (convert to seconds: ~400ms per slot)
+	if latencyCount > 0 {
+		batch.AvgLatency = float64(totalLatencySum) / float64(latencyCount) * 0.4
 	}
 
-	// Missed slots = total slots in batch - voted slots
-	batch.MissedSlots = batch.TotalSlots - batch.VotedSlots
-	if batch.MissedSlots < 0 {
-		batch.MissedSlots = 0
+	// CRITICAL: We cannot calculate "missed" TVCs for batches because:
+	// 1. Validators only vote for blocks they confirm, not every slot
+	// 2. We don't know how many blocks were produced in this batch
+	// 3. Real TVC are already in epochCredits from RPC
+	//
+	// Instead, we show vote frequency metrics:
+	// - How many votes in this batch (actualVotes)
+	// - Typical vote frequency is ~every 32 slots (lockout period)
+	// - Performance = actual votes / expected votes (based on frequency)
+
+	// Estimate expected votes based on typical vote frequency
+	// In Solana, validators typically vote every ~32 slots due to lockout
+	expectedVoteFrequency := int64(32)
+	expectedVotes := batch.TotalSlots / expectedVoteFrequency
+	if expectedVotes < 1 {
+		expectedVotes = 1
 	}
 
-	// Calculate performance based on earned credits vs max possible credits for entire batch
-	if maxPossibleCredits > 0 {
-		batch.Performance = float64(totalEarnedCredits) / float64(maxPossibleCredits) * 100.0
-	} else if batch.TotalSlots > 0 {
-		// Fallback to slot-based performance if no credits calculated
-		batch.Performance = float64(batch.VotedSlots) / float64(batch.TotalSlots) * 100.0
+	actualVotes := int64(len(batch.Votes))
+
+	// Missed TVCs: Set to 0 - we cannot calculate this meaningfully
+	// Real TVC are in epochCredits, not in batch-level calculations
+	batch.MissedTVCs = 0
+
+	// Missed slots: Show as 0 - this metric doesn't make sense for batches
+	// Validators don't vote for every slot, only for blocks they confirm
+	batch.MissedSlots = 0
+
+	// Performance: Based on vote frequency (actual vs expected)
+	// This shows if validator is voting more or less frequently than typical
+	// 100% = voting at expected frequency, >100% = voting more frequently (good!)
+	if expectedVotes > 0 {
+		batch.Performance = float64(actualVotes) / float64(expectedVotes) * 100.0
+		// Cap at 200% to avoid misleading high percentages
+		if batch.Performance > 200.0 {
+			batch.Performance = 200.0
+		}
 	} else {
 		batch.Performance = 0.0
 	}
@@ -463,14 +482,14 @@ func (v *VoteBatchAnalyzer) finalizeBatch(batch VoteBatch, currentSlot int64, ba
 }
 
 // calculateTVCForLatency calculates TVC credits based on vote latency
-// Formula from SIMD: Latency 1-2 = 8 credits, then -1 credit per additional slot, minimum 1
+// Formula from SIMD-0033: Latency 1-3 = 10 credits, then -1 credit per additional slot, minimum 1
 func (v *VoteBatchAnalyzer) calculateTVCForLatency(latency int64) int64 {
 	if latency <= TVCGracePeriod {
-		// Grace period: latency 1-2 = max credits (8)
+		// Grace period: latency 1-3 = max credits (10)
 		return MaxTVCPerVote
 	}
 
-	// After grace period: 8 - (latency - 2)
+	// After grace period: 10 - (latency - 3)
 	credits := MaxTVCPerVote - (latency - TVCGracePeriod)
 
 	// Minimum is 1 credit (never 0)
