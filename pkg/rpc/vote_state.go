@@ -49,50 +49,54 @@ func DeserializeVoteStateLatencies(base64Data string) ([]VoteStateLatency, error
 	
 	// Check if version is supported (0, 1, 2 are known versions)
 	if version > 2 {
-		return nil, fmt.Errorf("unsupported VoteStateVersion: %d (expected 0-2)", version)
+		return nil, fmt.Errorf("unsupported VoteStateVersion: %d (expected 0-2) at offset 0", version)
 	}
 
 	// Skip authorizedVoters (Vec<AuthorizedVoter>)
-	offset, err = skipVec(data, offset)
+	// AuthorizedVoter: pubkey (32 bytes) + epoch (u64) = 40 bytes
+	offset, err = skipVecWithElementSize(data, offset, 40, "authorizedVoters")
 	if err != nil {
 		return nil, fmt.Errorf("failed to skip authorizedVoters: %w", err)
 	}
 
 	// Skip priorVoters (Vec<PriorVoter>)
-	offset, err = skipVec(data, offset)
+	// PriorVoter: pubkey (32 bytes) + epoch (u64) = 40 bytes
+	offset, err = skipVecWithElementSize(data, offset, 40, "priorVoters")
 	if err != nil {
 		return nil, fmt.Errorf("failed to skip priorVoters: %w", err)
 	}
 
 	// Skip rootSlot (u64)
 	if offset+8 > len(data) {
-		return nil, fmt.Errorf("data too short for rootSlot")
+		return nil, fmt.Errorf("data too short for rootSlot at offset %d (data length: %d)", offset, len(data))
 	}
 	offset += 8
 
 	// Read votes (Vec<Lockout>)
 	latencies, err := readLockouts(data, offset)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read lockouts: %w", err)
+		return nil, fmt.Errorf("failed to read lockouts at offset %d: %w", offset, err)
 	}
 
 	return latencies, nil
 }
 
-// skipVec skips a Vec<T> in bincode format
+// skipVecWithElementSize skips a Vec<T> in bincode format with known element size
 // Vec<T> is: length (u64) + elements
-// For AuthorizedVoter: pubkey (32 bytes) + epoch (u64) = 40 bytes
-// For PriorVoter: pubkey (32 bytes) + epoch (u64) = 40 bytes
-func skipVec(data []byte, offset int) (int, error) {
+func skipVecWithElementSize(data []byte, offset int, elementSize int, vecName string) (int, error) {
 	if offset+8 > len(data) {
-		return offset, fmt.Errorf("data too short for vec length at offset %d", offset)
+		return offset, fmt.Errorf("data too short for %s vec length at offset %d (data length: %d)", 
+			vecName, offset, len(data))
 	}
 
 	length := binary.LittleEndian.Uint64(data[offset : offset+8])
 	offset += 8
 
-	// AuthorizedVoter/PriorVoter structure: pubkey (32 bytes) + epoch (u64) = 40 bytes
-	elementSize := 40
+	// Sanity check: length should be reasonable (max 1000 for authorizedVoters/priorVoters)
+	if length > 1000 {
+		return offset, fmt.Errorf("invalid %s vec length: %d (too large, possible data corruption or wrong offset at %d)", 
+			vecName, length, offset-8)
+	}
 
 	if length == 0 {
 		// Empty vector, nothing to skip
@@ -101,10 +105,8 @@ func skipVec(data []byte, offset int) (int, error) {
 
 	requiredSize := int(length) * elementSize
 	if offset+requiredSize > len(data) {
-		// Not enough data - this might indicate wrong offset or structure change
-		// Return current offset but log warning
-		return offset, fmt.Errorf("not enough data for vec: need %d bytes, have %d at offset %d", 
-			requiredSize, len(data)-offset, offset)
+		return offset, fmt.Errorf("not enough data for %s vec: need %d bytes for %d elements, have %d bytes at offset %d", 
+			vecName, requiredSize, length, len(data)-offset, offset)
 	}
 
 	offset += requiredSize
